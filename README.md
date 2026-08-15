@@ -69,6 +69,32 @@ dsh plugin --profile web add file:/abs/path/to/dsh-browser-fs
   在会话里能看出是哪台设备执行的。
 - 本机再授权一个目录就成为多执行者之一；某台设备断开或解除授权，roster 即时收缩。
 
+## 局域网/手机访问与安全上下文
+
+File System Access API 是安全上下文门控 API：只在 HTTPS 或 localhost 下存在，
+局域网 http（如 `http://192.168.0.x:9101`，常见于手机经代理访问）里
+`window.showDirectoryPicker` 根本不存在，无法 polyfill。本插件按
+`typeof window.showDirectoryPicker === 'function'` 做特性检测（不看
+`isSecureContext`——代理注入的 polyfill 可能改过它），检测不到时自动进入
+**兼容模式**，两档能力差异：
+
+| | 完整模式 | 兼容模式 |
+| --- | --- | --- |
+| 触发 | 安全上下文（HTTPS/localhost） | 非安全上下文自动降级 |
+| 选择方式 | 系统目录选择器（showDirectoryPicker） | input[webkitdirectory]，不支持退 multiple 多选文件 |
+| list / read | ✓ | ✓（File 内存映射，read 按 slice 截断不整读） |
+| write / 变更 | ✓ | ✗ 明确报错「兼容模式只读…」 |
+| 授权持久化 | ✓ IndexedDB，刷新自动恢复 | ✗ 无句柄可存，刷新后需重选（状态行有提示） |
+| 目录树浏览 | ✓ | ✓ 同路径（后端抽象两模式共用） |
+
+兼容模式下卡片显示「兼容模式」徽标与说明。获得完整模式的三种途径：
+
+1. SSH 端口转发到 localhost：`ssh -L 9101:127.0.0.1:9101 用户@主机`，然后走
+   `http://127.0.0.1:9101` 访问；
+2. Chrome 打开 `chrome://flags/#unsafely-treat-insecure-origin-as-secure`，
+   把局域网 origin 加白；
+3. 部署 HTTPS。
+
 ## 限制
 
 - **secure context**：File System Access API 要求 HTTPS 或 localhost 上下文；

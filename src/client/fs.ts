@@ -203,20 +203,52 @@ async function writeOp(root: FileSystemDirectoryHandle, args: Record<string, unk
 }
 
 /**
+ * 文件操作后端抽象：完整模式（FileSystemDirectoryHandle）与兼容模式
+ * （File 内存映射，只读）共用同一执行链 —— wire 协议与 host 半不感知差异。
+ */
+export interface FsBackend {
+  /** 兼容模式为 true：write 等变更操作抛 READ_ONLY_ERROR。 */
+  readonly readOnly: boolean
+  list(args: Record<string, unknown>, signal: AbortSignal): Promise<ListResult>
+  read(args: Record<string, unknown>): Promise<ReadResult>
+  write(args: Record<string, unknown>, signal: AbortSignal): Promise<WriteResult>
+  /** UI 目录树：列某级直接子级（path 相对根，'' 为根）。 */
+  listLevel(path: string, limit: number): Promise<LevelResult>
+}
+
+/** 兼容模式只读错误（写/删/建等变更操作的统一拒绝文案）。 */
+export const READ_ONLY_ERROR = '兼容模式只读（当前页面非安全上下文，File System Access API 不可用）'
+
+/**
+ * 完整模式后端：包装已授权目录句柄。
+ * @param root - 已授权（readwrite）的目录句柄。
+ * @returns 可写后端。
+ */
+export function handleBackend(root: FileSystemDirectoryHandle): FsBackend {
+  return {
+    readOnly: false,
+    list: (args, signal) => listOp(root, args, signal),
+    read: args => readOp(root, args),
+    write: (args, signal) => writeOp(root, args, signal),
+    listLevel: async (path, limit) => listLevel(await resolveDir(root, path), limit),
+  }
+}
+
+/**
  * 执行一次 host 下发的文件操作。
- * @param root - 已授权的目录句柄。
+ * @param backend - 当前后端（完整模式句柄或兼容模式 File 映射）。
  * @param op - 操作名。
  * @param args - 操作参数（wire 边界，逐项校验）。
  * @param signal - 取消信号（cancel 帧驱动）。
  * @returns 可 JSON 序列化的结果。
  */
 export function executeOp(
-  root: FileSystemDirectoryHandle,
+  backend: FsBackend,
   op: FsOp,
   args: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<ListResult | ReadResult | WriteResult> {
-  if (op === 'list') return listOp(root, args, signal)
-  if (op === 'read') return readOp(root, args)
-  return writeOp(root, args, signal)
+  if (op === 'list') return backend.list(args, signal)
+  if (op === 'read') return backend.read(args)
+  return backend.write(args, signal)
 }

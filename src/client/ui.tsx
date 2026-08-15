@@ -15,7 +15,7 @@
 import { useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import type { RosterExecutor } from '../wire.js'
-import { listLevel, resolveDir } from './fs.js'
+import type { FsBackend } from './fs.js'
 
 /** 卡片可见的全部状态（apply 闭包里的单一数据源）。 */
 export interface BrowserFsState {
@@ -23,7 +23,7 @@ export interface BrowserFsState {
   wsConnected: boolean
   /** 当前目录句柄的 readwrite 权限状态；none 表示尚未选过目录。 */
   permission: 'none' | 'prompt' | 'granted' | 'denied'
-  /** 已授权根目录名。 */
+  /** 已授权根目录名（兼容模式为所选目录/「N 个文件」）。 */
   dirName: string | null
   /** 授权交互进行中（系统选择器/权限弹窗开着）。 */
   busy: boolean
@@ -31,9 +31,9 @@ export interface BrowserFsState {
   error: string | null
   /** 卡片是否折叠成圆钮。 */
   collapsed: boolean
-  /** 当前授权根句柄（未授权为 null）；引用仅用于目录树读取。 */
-  root: FileSystemDirectoryHandle | null
-  /** 句柄代际：每次换目录/解除授权 +1，作目录树的重置 key。 */
+  /** 当前文件后端（完整模式句柄 / 兼容模式 File 映射；未授权为 null）。 */
+  backend: FsBackend | null
+  /** 后端代际：每次换目录/解除授权 +1，作目录树的重置 key。 */
   rootVersion: number
   /** 生效中的设备标签（昵称 ?? UA 派生）。 */
   label: string
@@ -41,20 +41,26 @@ export interface BrowserFsState {
   nickname: string | null
   /** host 广播的执行者名单（仅持有授权的设备；本机持柄时也含本机）。 */
   executors: RosterExecutor[]
+  /** showDirectoryPicker 是否可用（特性检测结果；false 即兼容模式语境）。 */
+  pickerAvailable: boolean
+  /** 当前是否处于兼容模式（File 映射、只读、无持久化）。 */
+  compat: boolean
 }
 
 /** 卡片动作（授权必须经过用户手势，全部挂按钮点击）。 */
 export interface CardActions {
-  /** 已有句柄时请求权限；无句柄时弹目录选择器。 */
+  /** 完整模式：请求权限/弹目录选择器；兼容模式：弹 input 选目录。 */
   authorize(): void
-  /** 弹目录选择器换一个新目录。 */
+  /** 换一个新目录（两模式各自的选择器）。 */
   pickNew(): void
-  /** 清除持久化句柄，回到未授权状态。 */
+  /** 清除授权/兼容选择，回到未授权状态。 */
   revoke(): void
   /** 收起成圆钮 / 展开回卡片。 */
   toggleCollapsed(): void
   /** 设置设备昵称（空串清除，回落 UA 派生）。 */
   setDeviceName(name: string): void
+  /** 兼容模式：弹 input[type=file] 选目录/文件。 */
+  pickCompat(): void
 }
 
 /** 卡片数据源：订阅 + 快照 + 动作。 */
@@ -120,7 +126,9 @@ function statusColor(state: BrowserFsState): string {
 function statusText(state: BrowserFsState): string {
   if (!state.wsConnected) return '未连接宿主（重连中）'
   switch (state.permission) {
-    case 'granted': return `已授权：${state.dirName ?? ''}（本机：${state.label}）`
+    case 'granted': return state.compat
+      ? `已选择：${state.dirName ?? ''}（本机：${state.label}；兼容模式只读，刷新后需重选）`
+      : `已授权：${state.dirName ?? ''}（本机：${state.label}）`
     case 'prompt': return '目录权限待确认'
     case 'denied': return '目录权限被拒绝'
     case 'none': {
@@ -179,10 +187,11 @@ const rowTextStyle: CSSProperties = {
 
 /**
  * 「目录内容」懒加载树：首次打开只读根级，点目录行展开读子级（每次展开经
- * resolveDir 从根重新取句柄，容忍 revoke 后的最新状态），再点收起并丢弃缓存。
- * @param props.root - 当前授权根句柄。
+ * 后端重新取该级，容忍 revoke 后的最新状态），再点收起并丢弃缓存。
+ * 兼容模式与完整模式同路径（后端各自实现 listLevel）。
+ * @param props.backend - 当前文件后端。
  */
-function DirTree({ root }: { root: FileSystemDirectoryHandle }): ReactElement {
+function DirTree({ backend }: { backend: FsBackend }): ReactElement {
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [levels, setLevels] = useState<ReadonlyMap<string, LevelData>>(new Map())
@@ -193,8 +202,7 @@ function DirTree({ root }: { root: FileSystemDirectoryHandle }): ReactElement {
   const loadLevel = async (dirPath: string): Promise<void> => {
     setLoading(prev => new Set(prev).add(dirPath))
     try {
-      const dir = await resolveDir(root, dirPath)
-      const { entries, total } = await listLevel(dir, LEVEL_LIMIT)
+      const { entries, total } = await backend.listLevel(dirPath, LEVEL_LIMIT)
       const nodes: TreeNode[] = entries.map(entry => ({
         ...entry,
         path: dirPath === '' ? entry.name : `${dirPath}/${entry.name}`,
@@ -415,16 +423,25 @@ export function createCard(source: CardSource): () => ReactElement {
         </div>
         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           {state.permission === 'granted'
-            ? (
-              <>
-                <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
-                <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>解除授权</button>
-              </>
-            )
+            ? state.compat
+              ? (
+                <>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompat() }}>重新选择</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>清除</button>
+                </>
+              )
+              : (
+                <>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>解除授权</button>
+                </>
+              )
             : (
               <>
                 <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.authorize() }}>
-                  {state.permission === 'none' ? '授权目录' : '重新授权'}
+                  {state.pickerAvailable
+                    ? (state.permission === 'none' ? '授权目录' : '重新授权')
+                    : '选择目录（兼容模式）'}
                 </button>
                 {state.permission !== 'none' && (
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
@@ -432,8 +449,34 @@ export function createCard(source: CardSource): () => ReactElement {
               </>
             )}
         </div>
-        {state.permission === 'granted' && state.root !== null && (
-          <DirTree key={state.rootVersion} root={state.root} />
+        {!state.pickerAvailable && (
+          <div style={{ marginTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.12)', paddingTop: '6px', opacity: 0.85 }}>
+            <span style={{
+              display: 'inline-block', padding: '0 6px', borderRadius: '4px',
+              background: 'rgba(251, 188, 4, 0.25)', color: '#fbbc04',
+              fontSize: '10px', marginBottom: '4px',
+            }}>
+              兼容模式
+            </span>
+            <div>
+              当前页面非安全上下文，File System Access API 不可用：只能只读浏览，刷新后需重选。
+            </div>
+            <div style={{ marginTop: '4px' }}>
+              获得完整模式（可写 + 持久授权）：
+              <div style={{ marginTop: '2px', fontFamily: 'monospace', fontSize: '11px', opacity: 0.9 }}>
+                ① SSH 转发：ssh -L 9101:127.0.0.1:9101 用户@主机
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: '11px', opacity: 0.9 }}>
+                ② Chrome：chrome://flags/#unsafely-treat-insecure-origin-as-secure
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: '11px', opacity: 0.9 }}>
+                ③ 改用 HTTPS 访问
+              </div>
+            </div>
+          </div>
+        )}
+        {state.permission === 'granted' && state.backend !== null && (
+          <DirTree key={state.rootVersion} backend={state.backend} />
         )}
         {state.error !== null && (
           <div style={{ marginTop: '6px', color: '#f28b82' }}>{state.error}</div>

@@ -1,8 +1,13 @@
 /**
  * dsh-browser-fs client 半（浏览器）：连回 host 半的 WS 通道，接收 call 帧、
- * 在本机授权目录上执行 File System Access 操作、回发 result 帧；同时把
- * 授权卡片注册进 shell.overlay 层。句柄持久化在 IndexedDB（store.ts），
- * 启动时读回并 queryPermission 检查。
+ * 在本机授权目录上执行文件操作、回发 result 帧；同时把授权卡片注册进
+ * shell.overlay 层。
+ *
+ * 两档能力（特性检测 `typeof window.showDirectoryPicker === 'function'`，
+ * 不看 isSecureContext —— 代理可能改过它）：
+ *  - 完整模式：File System Access 句柄，IndexedDB 持久化（store.ts），可读写；
+ *  - 兼容模式（非安全上下文，如局域网 http 手机访问）：input[webkitdirectory]
+ *    选目录建 File 内存映射（files-backend.ts），只读、无持久化，刷新需重选。
  *
  * 产物契约：esbuild 打成 CJS 闭包，首尾包装 window.__ModuleLoader__.load
  * （见 build.mjs）；external 仅 react / react/jsx-runtime（模块表回答）。
@@ -11,7 +16,8 @@
 
 import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame, type RosterExecutor } from '../wire.js'
 import { deriveDeviceLabel } from './device.js'
-import { executeOp } from './fs.js'
+import { executeOp, handleBackend, type FsBackend } from './fs.js'
+import { createFilesBackend } from './files-backend.js'
 import { clearHandle, loadHandle, saveHandle } from './store.js'
 import { createCard, type BrowserFsState } from './ui.js'
 
@@ -57,6 +63,12 @@ export function apply(ctx: ClientCtx): void {
   /** UA 派生标签（昵称的兜底）。 */
   const derivedLabel = deriveDeviceLabel(navigator.userAgent)
 
+  /**
+   * 特性检测（不看 window.isSecureContext —— cenacle 代理的 polyfill 可能改过它）：
+   * showDirectoryPicker 不存在即落入兼容模式（只读 File 映射）。
+   */
+  const pickerAvailable = typeof window.showDirectoryPicker === 'function'
+
   let state: BrowserFsState = {
     wsConnected: false,
     permission: 'none',
@@ -64,11 +76,13 @@ export function apply(ctx: ClientCtx): void {
     busy: false,
     error: null,
     collapsed: storedCollapsed ?? false,
-    root: null,
+    backend: null,
     rootVersion: 0,
     label: storedNickname ?? derivedLabel,
     nickname: storedNickname,
     executors: [],
+    pickerAvailable,
+    compat: false,
   }
   const listeners = new Set<() => void>()
   const setState = (patch: Partial<BrowserFsState>): void => {
@@ -77,12 +91,22 @@ export function apply(ctx: ClientCtx): void {
   }
 
   let handle: FileSystemDirectoryHandle | null = null
+  let backend: FsBackend | null = null
   let rootVersion = 0
-  /** 句柄变更的统一入口：同步 snapshot 里的 root 引用并 bump 版本（目录树据此重置）。 */
+  /** 完整模式句柄变更：句柄后端 + snapshot 同步 + 版本 bump（目录树据此重置）。 */
   const setHandle = (next: FileSystemDirectoryHandle | null): void => {
     handle = next
+    backend = next === null ? null : handleBackend(next)
     rootVersion += 1
-    setState({ root: next, rootVersion })
+    setState({ backend, rootVersion, compat: false })
+  }
+  /** 兼容模式后端变更（File 映射；无句柄、无持久化）。调用方负责随后 sendState()。 */
+  const setCompatBackend = (files: File[]): void => {
+    const built = createFilesBackend(files)
+    handle = null
+    backend = built.backend
+    rootVersion += 1
+    setState({ backend, rootVersion, compat: true, dirName: built.dirName, permission: 'granted', error: null })
   }
   let ws: WebSocket | null = null
   let disposed = false
@@ -90,8 +114,8 @@ export function apply(ctx: ClientCtx): void {
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   const inflight = new Map<string, AbortController>()
 
-  /** 只有「句柄在手 + readwrite 已授予」才算可执行。 */
-  const ready = (): boolean => handle !== null && state.permission === 'granted'
+  /** 只有「后端在手 + readwrite 已授予」才算可执行（兼容模式后端即授即 granted）。 */
+  const ready = (): boolean => backend !== null && state.permission === 'granted'
 
   /** 向 host 广播当前授权状态 + 设备标签（host 据此挑执行者并维护 roster）。 */
   const sendState = (): void => {
@@ -110,14 +134,14 @@ export function apply(ctx: ClientCtx): void {
   }
 
   const onCall = async (rpcId: string, op: 'list' | 'read' | 'write', args: Record<string, unknown>): Promise<void> => {
-    if (handle === null || !ready()) {
+    if (backend === null || !ready()) {
       reply({ type: 'result', rpcId, ok: false, error: 'browser-fs: this tab holds no authorized directory' })
       return
     }
     const abort = new AbortController()
     inflight.set(rpcId, abort)
     try {
-      const value = await executeOp(handle, op, args, abort.signal)
+      const value = await executeOp(backend, op, args, abort.signal)
       reply({ type: 'result', rpcId, ok: true, value })
     } catch (error) {
       reply({
@@ -169,8 +193,10 @@ export function apply(ctx: ClientCtx): void {
     sock.onerror = () => { sock.close() }
   }
 
-  /** 启动恢复：读回 IndexedDB 句柄并检查权限（不自动 requestPermission —— 需要用户手势）。 */
+  /** 启动恢复：读回 IndexedDB 句柄并检查权限（不自动 requestPermission —— 需要用户手势）。
+   *  兼容模式（无 showDirectoryPicker）没有句柄可持久化，直接跳过。 */
   const restore = async (): Promise<void> => {
+    if (!pickerAvailable) return
     const stored = await loadHandle()
     if (stored === null) {
       setState({ permission: 'none', dirName: null })
@@ -186,25 +212,56 @@ export function apply(ctx: ClientCtx): void {
   }
 
   /**
-   * 环境阻断检查：两种情况下授权注定失败，提前给出可操作的中文引导而非
-   * 甩浏览器原始报错。
-   * 1. 非安全上下文（http://局域网IP）：showDirectoryPicker 直接不存在；
-   * 2. 跨源 iframe（如 cenacle 网页浏览窗口）：浏览器禁止子框架弹文件
-   *    选择器。授权在独立标签页完成一次即可——句柄按源持久化在
-   *    IndexedDB，此后 iframe 内无需再弹。
+   * 环境阻断检查（仅完整模式的授权路径）：跨源 iframe（如 cenacle 网页浏览
+   * 窗口）里浏览器禁止子框架弹文件选择器，提前给出可操作的中文引导而非甩
+   * 浏览器原始报错。授权在独立标签页完成一次即可——句柄按源持久化在
+   * IndexedDB，此后 iframe 内无需再弹。
+   * 非安全上下文不再是阻断：showDirectoryPicker 缺失时 authorize 自动落
+   * 兼容模式（input 选目录，iframe 里同样可用）。
    */
   const envBlocker = (): string | null => {
-    if (typeof showDirectoryPicker !== 'function') {
-      return '当前页面不是安全上下文（需 HTTPS 或 localhost），File System Access API 不可用'
-    }
     if (window.self !== window.top) {
       return '嵌入窗口里无法弹出目录选择器：请点下方链接在独立标签页打开本页完成授权（一次即可，此后嵌入窗口内自动可用）'
     }
     return null
   }
 
+  /**
+   * 兼容模式的目录/文件选择器：一个隐藏的 input[type=file]（webkitdirectory
+   * 优先，不支持退 multiple）。change 后建 File 映射后端。
+   */
+  let compatInput: HTMLInputElement | null = null
+  const openCompatPicker = (): void => {
+    if (compatInput === null) {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.style.display = 'none'
+      // webkitdirectory 探测走 Record 形态（TS 的 lib.dom 认为它恒在，直接 in 会把 else 窄化成 never）。
+      const probe = input as unknown as Record<string, unknown>
+      if ('webkitdirectory' in probe) input.webkitdirectory = true
+      else input.multiple = true
+      input.addEventListener('change', () => {
+        const files = input.files
+        if (files !== null && files.length > 0) {
+          setCompatBackend([...files])
+          sendState()
+        }
+      })
+      document.body.appendChild(input)
+      compatInput = input
+    }
+    // 清空 value 允许重选同一目录（否则 change 不触发）。
+    compatInput.value = ''
+    compatInput.click()
+  }
+
   const actions = {
     authorize(): void {
+      // 特性检测失败 → 自动降级：兼容模式选目录（只读）。
+      if (!pickerAvailable) {
+        openCompatPicker()
+        return
+      }
       void (async () => {
         const blocker = envBlocker()
         if (blocker !== null) {
@@ -234,6 +291,10 @@ export function apply(ctx: ClientCtx): void {
       })()
     },
     pickNew(): void {
+      if (!pickerAvailable) {
+        openCompatPicker()
+        return
+      }
       void (async () => {
         const blocker = envBlocker()
         if (blocker !== null) {
@@ -259,8 +320,10 @@ export function apply(ctx: ClientCtx): void {
     revoke(): void {
       void (async () => {
         setHandle(null)
-        await clearHandle()
-        setState({ permission: 'none', dirName: null, error: null })
+        backend = null
+        setState({ backend: null })
+        if (pickerAvailable) await clearHandle()
+        setState({ permission: 'none', dirName: null, error: null, compat: false })
         sendState()
       })()
     },
@@ -288,6 +351,10 @@ export function apply(ctx: ClientCtx): void {
       setState({ nickname, label: nickname ?? derivedLabel })
       sendState()
     },
+    /** 兼容模式：弹 input 选目录/文件（UI 的直接入口）。 */
+    pickCompat(): void {
+      openCompatPicker()
+    },
   }
 
   const card = createCard({
@@ -308,6 +375,8 @@ export function apply(ctx: ClientCtx): void {
       ws?.close()
       for (const controller of inflight.values()) controller.abort()
       inflight.clear()
+      compatInput?.remove()
+      compatInput = null
     }
   }, 'browser-fs: websocket lifecycle')
 
