@@ -289,6 +289,48 @@ export function apply(ctx: ClientCtx): void {
     compatInput.click()
   }
 
+  /** 移动端（华为浏览器等）showDirectoryPicker 存在但不可用——AbortError 被
+   *  静默吞，用户视角就是"点了没反应"。这类失败自动降级兼容模式；桌面用户
+   *  主动取消（AbortError）保持静默。 */
+  const isMobileLike = /Android|HarmonyOS|iPhone|iPad/i.test(navigator.userAgent)
+
+  /** 完整模式选择器统一入口：reuse=true 优先复用已授权句柄（authorize），
+   *  false 强制新选（pickNew）。 */
+  const runFullModePicker = async (reuse: boolean): Promise<void> => {
+    const blocker = envBlocker()
+    if (blocker !== null) {
+      setState({ error: blocker })
+      return
+    }
+    setState({ busy: true, error: null })
+    try {
+      if (reuse && handle !== null) {
+        const permission = await handle.requestPermission({ mode: 'readwrite' })
+        setState({ permission, dirName: handle.name })
+      } else {
+        console.log('[browser-fs] showDirectoryPicker 调用')
+        const picked = await showDirectoryPicker({ mode: 'readwrite' })
+        console.log('[browser-fs] 目录已选:', picked.name)
+        setHandle(picked)
+        await saveHandle(picked)
+        setState({ permission: 'granted', dirName: picked.name })
+      }
+      sendState()
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : 'Error'
+      console.log('[browser-fs] showDirectoryPicker 失败:', name, error instanceof Error ? error.message : '')
+      if (isMobileLike) {
+        setState({ error: '当前浏览器的目录选择器不可用，已切换兼容模式' })
+        openCompatPicker('directory')
+      } else if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        // 用户关掉系统选择器/权限弹窗不是错误。
+        setState({ error: error instanceof Error ? error.message : String(error) })
+      }
+    } finally {
+      setState({ busy: false })
+    }
+  }
+
   const actions = {
     authorize(): void {
       // 特性检测失败 → 自动降级：兼容模式选目录（只读）。
@@ -296,60 +338,14 @@ export function apply(ctx: ClientCtx): void {
         openCompatPicker('directory')
         return
       }
-      void (async () => {
-        const blocker = envBlocker()
-        if (blocker !== null) {
-          setState({ error: blocker })
-          return
-        }
-        setState({ busy: true, error: null })
-        try {
-          if (handle === null) {
-            const picked = await showDirectoryPicker({ mode: 'readwrite' })
-            setHandle(picked)
-            await saveHandle(picked)
-            setState({ permission: 'granted', dirName: picked.name })
-          } else {
-            const permission = await handle.requestPermission({ mode: 'readwrite' })
-            setState({ permission, dirName: handle.name })
-          }
-          sendState()
-        } catch (error) {
-          // 用户关掉系统选择器/权限弹窗不是错误。
-          if (!(error instanceof DOMException && error.name === 'AbortError')) {
-            setState({ error: error instanceof Error ? error.message : String(error) })
-          }
-        } finally {
-          setState({ busy: false })
-        }
-      })()
+      void runFullModePicker(true)
     },
     pickNew(): void {
       if (!pickerAvailable) {
         openCompatPicker('directory')
         return
       }
-      void (async () => {
-        const blocker = envBlocker()
-        if (blocker !== null) {
-          setState({ error: blocker })
-          return
-        }
-        setState({ busy: true, error: null })
-        try {
-          const picked = await showDirectoryPicker({ mode: 'readwrite' })
-          setHandle(picked)
-          await saveHandle(picked)
-          setState({ permission: 'granted', dirName: picked.name })
-          sendState()
-        } catch (error) {
-          if (!(error instanceof DOMException && error.name === 'AbortError')) {
-            setState({ error: error instanceof Error ? error.message : String(error) })
-          }
-        } finally {
-          setState({ busy: false })
-        }
-      })()
+      void runFullModePicker(false)
     },
     revoke(): void {
       void (async () => {
