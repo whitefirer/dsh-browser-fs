@@ -8,14 +8,23 @@
  *    持久化到 localStorage（本文件只读快照）。
  *
  * 目录树状态（展开集合/已加载层级）是组件内的 useState —— 纯 viewing state，
- * 不进共享快照；rootVersion 作 key，换目录/解除授权时整树重置。
+ * 不进共享快照；rootVersion 作 key，换目录/解除授权时整树重置。文件名可点击
+ * 弹出预览层（FilePreview：图片走 blob URL，文本取前 64KB）；授权行的「↻」
+ * 刷新按钮经 apiRef 调 DirTree 的清缓存重拉（兼容模式改为重开选择器）。
  * @module dsh-browser-fs/client/ui
  */
 
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import type { RosterExecutor } from '../wire.js'
 import type { FsBackend } from './fs.js'
+import {
+  MAX_IMAGE_PREVIEW_BYTES,
+  TEXT_PREVIEW_BYTES,
+  imageMimeFor,
+  looksBinary,
+  previewKindFor,
+} from './preview.js'
 
 /** 卡片可见的全部状态（apply 闭包里的单一数据源）。 */
 export interface BrowserFsState {
@@ -185,19 +194,182 @@ const rowTextStyle: CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
+// ---------- 文件预览层 ----------
+
+/** 预览内容状态机（加载中/各类结果/错误）。 */
+type PreviewResult =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'too-big'; size: number }
+  | { status: 'binary'; size: number }
+  | { status: 'image'; url: string; size: number }
+  | { status: 'text'; text: string; size: number; truncated: boolean }
+
+const previewMaskStyle: CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 1100,
+  background: 'rgba(0, 0, 0, 0.55)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+
+const previewCardStyle: CSSProperties = {
+  maxWidth: 'min(720px, 90vw)',
+  maxHeight: '80vh',
+  overflow: 'auto',
+  padding: '10px 12px',
+  borderRadius: '10px',
+  background: 'rgba(32, 33, 36, 0.98)',
+  color: '#e8eaed',
+  fontSize: '12px',
+  lineHeight: 1.5,
+  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.35)',
+  fontFamily: 'system-ui, sans-serif',
+}
+
+/**
+ * 文件预览层：遮罩 + 卡片。图片（按扩展名）读 arrayBuffer 建 blob URL 用
+ * <img> 展示（>8MB 不拉取，直接提示太大）；其余按文本只取前 64KB UTF-8
+ * 解码，等宽 <pre> 展示并标注截断；解码后含 NUL 视为二进制。
+ * ✕ / 点遮罩 / ESC 关闭，关闭（卸载）时 revokeObjectURL。
+ * @param props.backend - 当前文件后端（两模式同路径，readBlob 各自实现）。
+ * @param props.path - 相对授权根的文件路径。
+ * @param props.onClose - 关闭回调。
+ */
+function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: string; onClose(): void }): ReactElement {
+  const [result, setResult] = useState<PreviewResult>({ status: 'loading' })
+  const name = path.split('/').pop() ?? path
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+    void (async () => {
+      try {
+        const blob = await backend.readBlob(path)
+        if (previewKindFor(path) === 'image') {
+          if (blob.size > MAX_IMAGE_PREVIEW_BYTES) {
+            if (!cancelled) setResult({ status: 'too-big', size: blob.size })
+            return
+          }
+          const buffer = await blob.arrayBuffer()
+          objectUrl = URL.createObjectURL(new Blob([buffer], { type: imageMimeFor(path) }))
+          if (!cancelled) setResult({ status: 'image', url: objectUrl, size: blob.size })
+        } else {
+          const truncated = blob.size > TEXT_PREVIEW_BYTES
+          const text = await (truncated ? blob.slice(0, TEXT_PREVIEW_BYTES) : blob).text()
+          if (cancelled) return
+          if (looksBinary(text)) setResult({ status: 'binary', size: blob.size })
+          else setResult({ status: 'text', text, size: blob.size, truncated })
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setResult({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+      if (objectUrl !== null) URL.revokeObjectURL(objectUrl)
+    }
+  }, [backend, path])
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [onClose])
+
+  return (
+    <div style={previewMaskStyle} onClick={onClose}>
+      <div style={previewCardStyle} onClick={(event) => { event.stopPropagation() }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <strong style={{ ...rowTextStyle, flex: 1 }} title={path}>📄 {name}</strong>
+          <button
+            style={{ ...buttonStyle, padding: '0 7px', lineHeight: 1.2 }}
+            onClick={onClose}
+            title="关闭（Esc）"
+          >
+            ✕
+          </button>
+        </div>
+        <div style={{ ...rowTextStyle, opacity: 0.6, fontFamily: 'monospace', fontSize: '11px' }} title={path}>
+          {path}
+        </div>
+        <div style={{ marginTop: '8px' }}>
+          {result.status === 'loading' && <span style={{ opacity: 0.6 }}>加载中…</span>}
+          {result.status === 'error' && <span style={{ color: '#f28b82' }}>{result.message}</span>}
+          {result.status === 'too-big' && (
+            <span style={{ opacity: 0.85 }}>图片太大（{humanSize(result.size)}），超过 8MB 不预览</span>
+          )}
+          {result.status === 'binary' && (
+            <span style={{ opacity: 0.85 }}>二进制文件不支持预览（{humanSize(result.size)}）</span>
+          )}
+          {result.status === 'image' && (
+            <img src={result.url} alt={name} style={{ maxWidth: '100%', borderRadius: '6px' }} />
+          )}
+          {result.status === 'text' && (
+            <>
+              {result.truncated && (
+                <div style={{ opacity: 0.6, marginBottom: '4px' }}>
+                  仅前 64KB（文件共 {humanSize(result.size)}）
+                </div>
+              )}
+              <pre style={{
+                margin: 0, fontFamily: 'monospace', fontSize: '11px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+              }}>
+                {result.text}
+              </pre>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** DirTree 暴露给卡片授权行的刷新入口（清缓存 + 重拉根级）。 */
+export interface DirTreeApi {
+  refresh(): void
+}
+
 /**
  * 「目录内容」懒加载树：首次打开只读根级，点目录行展开读子级（每次展开经
  * 后端重新取该级，容忍 revoke 后的最新状态），再点收起并丢弃缓存。
- * 兼容模式与完整模式同路径（后端各自实现 listLevel）。
+ * 兼容模式与完整模式同路径（后端各自实现 listLevel）。文件名可点击弹出
+ * 预览层；refresh()（授权行「↻」按钮经 apiRef 调用）清空全部层级/展开
+ * 缓存并重拉根级（树区未展开时只清缓存，下次打开再拉）。
  * @param props.backend - 当前文件后端。
+ * @param props.apiRef - 输出 DirTreeApi 的引用（createCard 闭包持有）。
  */
-function DirTree({ backend }: { backend: FsBackend }): ReactElement {
+function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: DirTreeApi | null } }): ReactElement {
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [levels, setLevels] = useState<ReadonlyMap<string, LevelData>>(new Map())
   const [loading, setLoading] = useState<ReadonlySet<string>>(new Set())
   const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map())
   const [copied, setCopied] = useState<string | null>(null)
+  /** 预览中的文件相对路径（null 为无预览层）。 */
+  const [preview, setPreview] = useState<string | null>(null)
+
+  /** 清全部层级/展开缓存并重拉根级（树区收起时只清缓存，下次展开再拉）。 */
+  const refresh = (): void => {
+    setExpanded(new Set())
+    setLevels(new Map())
+    setErrors(new Map())
+    setCopied(null)
+    if (open) void loadLevel('')
+  }
+
+  // 每次渲染重挂 api（refresh 闭包随 open 变化）；卸载时清空。
+  useEffect(() => {
+    apiRef.current = { refresh }
+    return () => { apiRef.current = null }
+  })
 
   const loadLevel = async (dirPath: string): Promise<void> => {
     setLoading(prev => new Set(prev).add(dirPath))
@@ -279,7 +451,11 @@ function DirTree({ backend }: { backend: FsBackend }): ReactElement {
             )
             : (
               <>
-                <span style={{ ...rowTextStyle, flex: 1 }} title={entry.path}>
+                <span
+                  style={{ ...rowTextStyle, flex: 1, cursor: 'pointer', color: '#8ab4f8' }}
+                  title={`点击预览：${entry.path}`}
+                  onClick={() => { setPreview(entry.path) }}
+                >
                   📄 {entry.name}
                   {entry.size !== undefined && <span style={{ opacity: 0.55 }}> {humanSize(entry.size)}</span>}
                 </span>
@@ -336,6 +512,9 @@ function DirTree({ backend }: { backend: FsBackend }): ReactElement {
           {renderLevel('', 0)}
         </div>
       )}
+      {preview !== null && (
+        <FilePreview backend={backend} path={preview} onClose={() => { setPreview(null) }} />
+      )}
     </div>
   )
 }
@@ -346,6 +525,8 @@ function DirTree({ backend }: { backend: FsBackend }): ReactElement {
  * @returns 可注册进 shell.overlay 的函数组件。
  */
 export function createCard(source: CardSource): () => ReactElement {
+  /** DirTree 的清缓存重拉入口（组件挂载时填入，卸载清空）。 */
+  const treeApi: { current: DirTreeApi | null } = { current: null }
   return function BrowserFsCard(): ReactElement {
     const state = useSyncExternalStore(source.subscribe, source.getSnapshot)
     const { actions } = source
@@ -428,12 +609,22 @@ export function createCard(source: CardSource): () => ReactElement {
                 <>
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompat() }}>重新选择</button>
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>清除</button>
+                  {/* 兼容模式缓存即选择时快照，刷新 = 重新选择目录。 */}
+                  <button
+                    style={buttonStyle}
+                    disabled={state.busy}
+                    title="刷新目录（重新选择）"
+                    onClick={() => { actions.pickCompat() }}
+                  >
+                    ↻
+                  </button>
                 </>
               )
               : (
                 <>
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>解除授权</button>
+                  <button style={buttonStyle} title="刷新目录" onClick={() => { treeApi.current?.refresh() }}>↻</button>
                 </>
               )
             : (
@@ -476,7 +667,7 @@ export function createCard(source: CardSource): () => ReactElement {
           </div>
         )}
         {state.permission === 'granted' && state.backend !== null && (
-          <DirTree key={state.rootVersion} backend={state.backend} />
+          <DirTree key={state.rootVersion} backend={state.backend} apiRef={treeApi} />
         )}
         {state.error !== null && (
           <div style={{ marginTop: '6px', color: '#f28b82' }}>{state.error}</div>

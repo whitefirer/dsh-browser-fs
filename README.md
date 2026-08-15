@@ -54,6 +54,24 @@ dsh plugin --profile web add file:/abs/path/to/dsh-browser-fs
 
 工具描述里明确告知模型：操作的是**浏览器机器**的本地盘，不是宿主机文件系统。
 
+## 预览与刷新
+
+「目录内容」树里**点文件名**弹出预览层（遮罩 + 卡片，✕ / 点遮罩 / ESC 关闭，
+层上显示文件名与相对路径）：
+
+- **图片**（png/jpg/jpeg/gif/webp/svg/ico/bmp）：读 arrayBuffer 建 blob URL 用
+  `<img>` 展示（关闭时 revokeObjectURL）；超过 8MB 不拉取，直接提示太大；
+- **其余按文本**：只取前 64KB，UTF-8 解码，等宽 `<pre>` 展示，截断标注
+  「仅前 64KB」；解码后含 NUL 字符视为二进制，显示「二进制文件不支持预览」。
+
+预览两模式同路径（完整/兼容后端的 `readBlob` 各自实现），兼容模式只读也能用。
+
+授权按钮行末尾的「↻」是刷新目录：
+
+- **完整模式**：清空目录树全部缓存（展开集合/已加载层级）并重拉根级；
+- **兼容模式**：缓存即选择时的 File 快照，浏览器不允许静默重读，刷新无意义
+  —— 该按钮改为重新打开目录选择器（同「重新选择」）。
+
 ## 多设备
 
 多台设备可以各自开着 dsh 页面，模型是「各自授权各自的本机目录」：
@@ -101,7 +119,7 @@ File System Access API 是安全上下文门控 API：只在 HTTPS 或 localhost
   纯 HTTP 远程访问页面时授权按钮会报明确错误。
 - **标签页必须开着**：没有浏览器标签在线时，工具调用立即返回明确错误；
   有标签但没授权目录时同样立即报错。
-- 只支持 UTF-8 文本读写（二进制/图片不在本插件范围）。
+- agent 工具只支持 UTF-8 文本读写（二进制写入不在范围；图片仅卡片内预览，见「预览与刷新」）。
 - client 半固定连默认 WS 路径 `/browser-fs/ws`；host 半若改了 `wsPath` 配置，
   client 半的 `DEFAULT_WS_PATH`（`src/wire.ts`）需同步修改并重新 build。
 - host 半以 peerDependency 依赖 `@deepseek-ai/dsh-tools`（defineTool），运行时经

@@ -168,6 +168,13 @@ export function createFilesBackend(files: File[]): { backend: FsBackend; dirName
       return Promise.reject(new Error(READ_ONLY_ERROR))
     },
 
+    readBlob(path: string): Promise<Blob> {
+      splitPath(path) // 仅校验逃逸
+      const file = map.get(path)
+      if (file === undefined) return Promise.reject(new Error(`no such file or directory: ${path}`))
+      return Promise.resolve(file)
+    },
+
     listLevel(path: string, limit: number): Promise<LevelResult> {
       splitPath(path)
       const { dirs, files: levelFiles } = scanLevel(map, path)

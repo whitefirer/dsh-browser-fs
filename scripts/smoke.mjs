@@ -131,9 +131,9 @@ await new Promise((resolve) => {
   evil.once('error', (e) => { check('cross-origin rejected', e.message.includes('403')); resolve() })
 })
 
-// 7. 兼容模式降级路径（headless）：esbuild 现场编译 files-backend/device，
+// 7. 兼容模式降级路径（headless）：esbuild 现场编译 files-backend/device/preview，
 // 用 Node 的全局 File 模拟 input 选中的文件列表（showDirectoryPicker 缺失的分支
-// 在浏览器侧由 pickerAvailable 特性检测驱动，这里覆盖后端行为本身）。
+// 在浏览器侧由 pickerAvailable 特性检测驱动，这里覆盖后端行为本身与预览纯函数）。
 {
   const { build } = await import('esbuild')
   const { mkdtempSync } = await import('node:fs')
@@ -141,7 +141,7 @@ await new Promise((resolve) => {
   const { join } = await import('node:path')
   const out = join(mkdtempSync(join(tmpdir(), 'bfs-smoke-')), 'compat.mjs')
   await build({
-    entryPoints: ['src/client/files-backend.ts', 'src/client/device.ts'],
+    entryPoints: ['src/client/files-backend.ts', 'src/client/device.ts', 'src/client/preview.ts'],
     outdir: join(out, '..', 'compat-out'),
     bundle: true,
     format: 'esm',
@@ -150,8 +150,17 @@ await new Promise((resolve) => {
   })
   const backendUrl = new URL(`file://${join(out, '..', 'compat-out', 'files-backend.js')}`)
   const deviceUrl = new URL(`file://${join(out, '..', 'compat-out', 'device.js')}`)
+  const previewUrl = new URL(`file://${join(out, '..', 'compat-out', 'preview.js')}`)
   const { createFilesBackend } = await import(backendUrl.href)
   const { deriveDeviceLabel } = await import(deviceUrl.href)
+  const {
+    IMAGE_EXTENSIONS,
+    MAX_IMAGE_PREVIEW_BYTES,
+    TEXT_PREVIEW_BYTES,
+    imageMimeFor,
+    looksBinary,
+    previewKindFor,
+  } = await import(previewUrl.href)
 
   const mkFile = (content, relPath) => {
     const name = relPath.split('/').at(-1)
@@ -192,6 +201,23 @@ await new Promise((resolve) => {
     () => check('compat read missing', false),
     (e) => check('compat read missing', e.message.includes('no such file')),
   )
+
+  // readBlob（预览用）：惰性 Blob 引用，调用方自行 slice
+  const blob = await backend.readBlob('sub/b.txt')
+  check('compat readBlob', blob.size === 300 && (await blob.slice(0, 10).text()) === 'x'.repeat(10))
+  await backend.readBlob('nope.txt').then(
+    () => check('compat readBlob missing', false),
+    (e) => check('compat readBlob missing', e.message.includes('no such file')),
+  )
+
+  // 预览纯函数：类型判断 / 二进制嗅探 / MIME / 上限常量
+  check('preview kind image', previewKindFor('a/b/photo.PNG') === 'image'
+    && IMAGE_EXTENSIONS.has('svg') && previewKindFor('icon.svg') === 'image')
+  check('preview kind text fallback', previewKindFor('notes.md') === 'text'
+    && previewKindFor('Makefile') === 'text' && previewKindFor('.png') === 'text')
+  check('preview binary sniff', looksBinary('ab\0c') && !looksBinary('你好，世界'))
+  check('preview image mime', imageMimeFor('x.svg') === 'image/svg+xml' && imageMimeFor('x.JPG') === 'image/jpeg')
+  check('preview limits', MAX_IMAGE_PREVIEW_BYTES === 8 * 1024 * 1024 && TEXT_PREVIEW_BYTES === 64 * 1024)
 
   // write：只读拒绝，文案明确
   await backend.write({ path: 'x', content: 'y' }, new AbortController().signal).then(

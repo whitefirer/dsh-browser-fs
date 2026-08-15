@@ -161,25 +161,36 @@ async function listOp(root: FileSystemDirectoryHandle, args: Record<string, unkn
   return { entries, truncated }
 }
 
-async function readOp(root: FileSystemDirectoryHandle, args: Record<string, unknown>): Promise<ReadResult> {
-  const path = asString(args.path, 'path')
-  if (path === undefined || path === '') throw new Error('path is required')
-  const maxBytes = typeof args.maxBytes === 'number' && Number.isFinite(args.maxBytes) && args.maxBytes > 0
-    ? Math.floor(args.maxBytes)
-    : DEFAULT_MAX_BYTES
+/**
+ * 从根句柄取到某个文件的 File 对象（惰性引用，不读内容）。
+ * readOp 与 UI 预览（readBlob）共用。
+ * @param root - 已授权根目录句柄。
+ * @param path - 相对根的文件路径。
+ * @returns File 对象。
+ */
+async function resolveFile(root: FileSystemDirectoryHandle, path: string): Promise<File> {
   const segments = splitPath(path)
   const name = segments.pop()
   if (name === undefined) throw new Error('path must name a file, not the root directory')
   try {
     const dir = await walkDir(root, segments, false)
     const fileHandle = await dir.getFileHandle(name)
-    const file = await fileHandle.getFile()
-    const truncated = file.size > maxBytes
-    const blob = truncated ? file.slice(0, maxBytes) : file
-    return { content: await blob.text(), size: file.size, truncated }
+    return await fileHandle.getFile()
   } catch (error) {
     throw describeFsError(path, error)
   }
+}
+
+async function readOp(root: FileSystemDirectoryHandle, args: Record<string, unknown>): Promise<ReadResult> {
+  const path = asString(args.path, 'path')
+  if (path === undefined || path === '') throw new Error('path is required')
+  const maxBytes = typeof args.maxBytes === 'number' && Number.isFinite(args.maxBytes) && args.maxBytes > 0
+    ? Math.floor(args.maxBytes)
+    : DEFAULT_MAX_BYTES
+  const file = await resolveFile(root, path)
+  const truncated = file.size > maxBytes
+  const blob = truncated ? file.slice(0, maxBytes) : file
+  return { content: await blob.text(), size: file.size, truncated }
 }
 
 async function writeOp(root: FileSystemDirectoryHandle, args: Record<string, unknown>, signal: AbortSignal): Promise<WriteResult> {
@@ -214,6 +225,8 @@ export interface FsBackend {
   write(args: Record<string, unknown>, signal: AbortSignal): Promise<WriteResult>
   /** UI 目录树：列某级直接子级（path 相对根，'' 为根）。 */
   listLevel(path: string, limit: number): Promise<LevelResult>
+  /** UI 预览：取文件的惰性 Blob 引用（不传字节上限，调用方自行 slice/arrayBuffer）。 */
+  readBlob(path: string): Promise<Blob>
 }
 
 /** 兼容模式只读错误（写/删/建等变更操作的统一拒绝文案）。 */
@@ -231,6 +244,7 @@ export function handleBackend(root: FileSystemDirectoryHandle): FsBackend {
     read: args => readOp(root, args),
     write: (args, signal) => writeOp(root, args, signal),
     listLevel: async (path, limit) => listLevel(await resolveDir(root, path), limit),
+    readBlob: path => resolveFile(root, path),
   }
 }
 
