@@ -1,6 +1,8 @@
 /**
  * 授权入口 UI：挂在 shell.overlay 层的浮动卡片（layer 本身 click-through，
- * 卡片根元素自行恢复 pointer events； fixed 右下角小卡，无全屏遮罩）。
+ * 卡片根元素自行恢复 pointer events；默认 fixed 右下角小卡，标题行可作
+ * 拖拽把手自由定位，位置存 localStorage 并在拖动结束/窗口 resize 时
+ * clamp 进视口）。
  *
  * 两种形态：
  *  - 展开：状态点 + 目录名 + 授权按钮组 + 「目录内容」懒加载树 + 「—」收起钮；
@@ -9,19 +11,21 @@
  *
  * 目录树状态（展开集合/已加载层级）是组件内的 useState —— 纯 viewing state，
  * 不进共享快照；rootVersion 作 key，换目录/解除授权时整树重置。文件名可点击
- * 弹出预览层（FilePreview：图片走 blob URL，文本取前 64KB）；授权行的「↻」
- * 刷新按钮经 apiRef 调 DirTree 的清缓存重拉（兼容模式改为重开选择器）。
+ * 弹出预览层（FilePreview：图片走 blob URL，文本取前 64KB，已映射语言经
+ * 懒加载高亮 chunk 做语法着色）；授权行的「↻」刷新按钮经 apiRef 调 DirTree
+ * 的清缓存重拉（兼容模式改为重开选择器）。
  * @module dsh-browser-fs/client/ui
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
-import type { RosterExecutor } from '../wire.js'
+import { DEFAULT_HIGHLIGHT_PATH, type RosterExecutor } from '../wire.js'
 import type { FsBackend } from './fs.js'
 import {
   MAX_IMAGE_PREVIEW_BYTES,
   TEXT_PREVIEW_BYTES,
   imageMimeFor,
+  langFor,
   looksBinary,
   previewKindFor,
 } from './preview.js'
@@ -203,7 +207,25 @@ type PreviewResult =
   | { status: 'too-big'; size: number }
   | { status: 'binary'; size: number }
   | { status: 'image'; url: string; size: number }
-  | { status: 'text'; text: string; size: number; truncated: boolean }
+  /** highlighting=true：语言已映射，高亮 chunk 加载中（先出纯文本，到位后换 code）。 */
+  | { status: 'text'; text: string; size: number; truncated: boolean; highlighting?: boolean }
+  | { status: 'code'; html: string; size: number; truncated: boolean }
+
+/** 高亮 chunk（lib/highlight.mjs）的导出契约。 */
+interface HighlightModule {
+  highlightCode(code: string, lang: string): string
+}
+
+/**
+ * 按需加载语法高亮 chunk：模块级缓存 import Promise，只拉一次；失败也缓存
+ * （路由缺失是持续状态，后续预览直接退回纯文本，不反复打请求）。
+ * 绝对路径 specifier esbuild 在 cjs 产物里同样原样保留 import()（已实测）。
+ */
+let highlightModulePromise: Promise<HighlightModule> | null = null
+function loadHighlighter(): Promise<HighlightModule> {
+  highlightModulePromise ??= import(DEFAULT_HIGHLIGHT_PATH) as Promise<HighlightModule>
+  return highlightModulePromise
+}
 
 const previewMaskStyle: CSSProperties = {
   position: 'fixed',
@@ -232,7 +254,9 @@ const previewCardStyle: CSSProperties = {
 /**
  * 文件预览层：遮罩 + 卡片。图片（按扩展名）读 arrayBuffer 建 blob URL 用
  * <img> 展示（>8MB 不拉取，直接提示太大）；其余按文本只取前 64KB UTF-8
- * 解码，等宽 <pre> 展示并标注截断；解码后含 NUL 视为二进制。
+ * 解码，等宽 <pre> 展示并标注截断；解码后含 NUL 视为二进制。文本经
+ * langFor 映射到语言时再做语法着色（高亮 chunk 按需加载，loading 态先出
+ * 纯文本，失败退回纯文本）。
  * ✕ / 点遮罩 / ESC 关闭，关闭（卸载）时 revokeObjectURL。
  * @param props.backend - 当前文件后端（两模式同路径，readBlob 各自实现）。
  * @param props.path - 相对授权根的文件路径。
@@ -260,8 +284,25 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
           const truncated = blob.size > TEXT_PREVIEW_BYTES
           const text = await (truncated ? blob.slice(0, TEXT_PREVIEW_BYTES) : blob).text()
           if (cancelled) return
-          if (looksBinary(text)) setResult({ status: 'binary', size: blob.size })
-          else setResult({ status: 'text', text, size: blob.size, truncated })
+          if (looksBinary(text)) {
+            setResult({ status: 'binary', size: blob.size })
+            return
+          }
+          const lang = langFor(path)
+          if (lang === null) {
+            setResult({ status: 'text', text, size: blob.size, truncated })
+            return
+          }
+          // 已映射语言：先出纯文本（标注着色加载中），chunk 到位后对截断文本
+          // 着色并换成 code 态；加载/着色失败静默退回纯文本。
+          setResult({ status: 'text', text, size: blob.size, truncated, highlighting: true })
+          try {
+            const mod = await loadHighlighter()
+            const html = mod.highlightCode(text, lang)
+            if (!cancelled) setResult({ status: 'code', html, size: blob.size, truncated })
+          } catch {
+            if (!cancelled) setResult({ status: 'text', text, size: blob.size, truncated })
+          }
         }
       } catch (error) {
         if (!cancelled) {
@@ -318,11 +359,33 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
                   仅前 64KB（文件共 {humanSize(result.size)}）
                 </div>
               )}
+              {result.highlighting === true && (
+                <div style={{ opacity: 0.6, marginBottom: '4px' }}>语法着色加载中…</div>
+              )}
               <pre style={{
                 margin: 0, fontFamily: 'monospace', fontSize: '11px',
                 whiteSpace: 'pre-wrap', wordBreak: 'break-all',
               }}>
                 {result.text}
+              </pre>
+            </>
+          )}
+          {result.status === 'code' && (
+            <>
+              {result.truncated && (
+                <div style={{ opacity: 0.6, marginBottom: '4px' }}>
+                  仅前 64KB（文件共 {humanSize(result.size)}）
+                </div>
+              )}
+              {/* hljs 输出已转义（& < >），可安全注入。 */}
+              <pre
+                className="hljs"
+                style={{
+                  margin: 0, fontFamily: 'monospace', fontSize: '11px',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                }}
+              >
+                <code dangerouslySetInnerHTML={{ __html: result.html }} />
               </pre>
             </>
           )}
@@ -519,6 +582,52 @@ function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: D
   )
 }
 
+// ---------- 卡片拖拽换位 ----------
+
+/** 卡片自由定位（fixed 的 left/top）；state 里 null 表示默认右下角（right/bottom 16px）。 */
+interface CardPos {
+  left: number
+  top: number
+}
+
+/** 卡片位置的 localStorage key（与 device-name/collapsed 同前缀约定）。 */
+const CARD_POS_KEY = 'dsh-browser-fs:card-pos'
+
+/** 拖动结束/窗口 resize 后视口内至少保留可见的像素数。 */
+const CARD_MIN_VISIBLE = 48
+
+/** 位移超过该像素才算拖拽；低于此按点击处理（不吃折叠/昵称/授权按钮的点击）。 */
+const DRAG_THRESHOLD_PX = 4
+
+/** 读本地记忆的卡片位置；缺失/畸形/localStorage 不可用一律回 null（默认位）。 */
+function readStoredCardPos(): CardPos | null {
+  try {
+    const raw = localStorage.getItem(CARD_POS_KEY)
+    if (raw === null) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const { left, top } = parsed as { left?: unknown; top?: unknown }
+    if (typeof left !== 'number' || typeof top !== 'number') return null
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return null
+    return { left, top }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把卡片位置 clamp 进视口：左右方向至少露 48px，上方不许出屏（标题行是
+ * 唯一把手，必须够得着），下方最多沉到只露 48px。
+ * @param pos - 待校正位置。
+ * @param size - 卡片当前实际尺寸。
+ */
+function clampCardPos(pos: CardPos, size: { width: number; height: number }): CardPos {
+  return {
+    left: Math.min(Math.max(pos.left, CARD_MIN_VISIBLE - size.width), window.innerWidth - CARD_MIN_VISIBLE),
+    top: Math.min(Math.max(pos.top, 0), window.innerHeight - CARD_MIN_VISIBLE),
+  }
+}
+
 /**
  * 创建卡片组件（闭包捕获数据源；组件本体无订阅机器，只读快照）。
  * @param source - 状态源与动作。
@@ -532,6 +641,83 @@ export function createCard(source: CardSource): () => ReactElement {
     const { actions } = source
     const [editingName, setEditingName] = useState(false)
     const [draftName, setDraftName] = useState('')
+    /** 自由定位（null = 默认右下角）；初值取本地记忆。 */
+    const [pos, setPos] = useState<CardPos | null>(readStoredCardPos)
+    const cardRef = useRef<HTMLDivElement | null>(null)
+    const dragRef = useRef<{
+      pointerId: number
+      startX: number
+      startY: number
+      baseLeft: number
+      baseTop: number
+      moved: boolean
+    } | null>(null)
+    /** 真拖拽后要吞掉紧随的 click（如按在「—」上起拖，松手不该触发折叠）。 */
+    const suppressClickRef = useRef(false)
+
+    /** 按卡片当前实际尺寸 clamp（ref 未挂载时按零尺寸兜底）。 */
+    const clampToViewport = (p: CardPos): CardPos => {
+      const card = cardRef.current
+      return clampCardPos(p, { width: card?.offsetWidth ?? 0, height: card?.offsetHeight ?? 0 })
+    }
+
+    // 恢复的位置可能已出视口（窗口此后变小过）：挂载后 clamp 一次；窗口
+    // resize 时同样 clamp。校正结果不落盘——存储的仍是用户拖放的点。
+    useEffect(() => {
+      const clampIntoView = (): void => { setPos(prev => (prev === null ? prev : clampToViewport(prev))) }
+      clampIntoView()
+      window.addEventListener('resize', clampIntoView)
+      return () => { window.removeEventListener('resize', clampIntoView) }
+      // clampToViewport 只读 ref，无需进依赖。
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+
+    // 标题行拖拽把手：pointer events 一统鼠标/触摸；capture 保证移出把手仍跟随。
+    const onHandlePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return
+      const card = cardRef.current
+      if (card === null) return
+      const rect = card.getBoundingClientRect()
+      dragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        baseLeft: rect.left,
+        baseTop: rect.top,
+        moved: false,
+      }
+      event.currentTarget.setPointerCapture(event.pointerId)
+    }
+
+    const onHandlePointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+      const drag = dragRef.current
+      if (drag === null || event.pointerId !== drag.pointerId) return
+      const dx = event.clientX - drag.startX
+      const dy = event.clientY - drag.startY
+      if (!drag.moved) {
+        // 阈值内不动卡片：保住把手上按钮/圆点的点击语义。
+        if (Math.abs(dx) <= DRAG_THRESHOLD_PX && Math.abs(dy) <= DRAG_THRESHOLD_PX) return
+        drag.moved = true
+      }
+      setPos({ left: drag.baseLeft + dx, top: drag.baseTop + dy })
+    }
+
+    const endDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
+      const drag = dragRef.current
+      if (drag === null || event.pointerId !== drag.pointerId) return
+      dragRef.current = null
+      if (!drag.moved) return
+      suppressClickRef.current = true
+      setPos(prev => {
+        const clamped = clampToViewport(prev ?? { left: drag.baseLeft, top: drag.baseTop })
+        try {
+          localStorage.setItem(CARD_POS_KEY, JSON.stringify(clamped))
+        } catch {
+          // localStorage 不可用：位置只在本次页面存活。
+        }
+        return clamped
+      })
+    }
 
     if (state.collapsed) {
       return (
@@ -547,9 +733,35 @@ export function createCard(source: CardSource): () => ReactElement {
       setEditingName(false)
     }
 
+    /** 有自由定位时改用 left/top 定位；否则保持默认右下角。 */
+    const appliedCardStyle: CSSProperties = pos === null
+      ? cardStyle
+      : { ...cardStyle, right: 'auto', bottom: 'auto', left: `${String(pos.left)}px`, top: `${String(pos.top)}px` }
+
     return (
-      <div style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+      <div
+        ref={cardRef}
+        style={appliedCardStyle}
+        onClickCapture={(event) => {
+          // 真拖拽后的 click 一律吞掉（防止拖到按钮上松手触发按钮动作）。
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false
+            event.stopPropagation()
+            event.preventDefault()
+          }
+        }}
+      >
+        <div
+          style={{
+            display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px',
+            cursor: 'grab', touchAction: 'none', userSelect: 'none',
+          }}
+          title="拖拽移动卡片"
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
           <span style={{
             width: '8px', height: '8px', borderRadius: '50%',
             background: statusColor(state), flexShrink: 0,

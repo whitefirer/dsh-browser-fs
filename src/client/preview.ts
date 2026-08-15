@@ -46,6 +46,37 @@ export function looksBinary(text: string): boolean {
 }
 
 /**
+ * 扩展名（小写，不含点）→ highlight.js 语言 id。tsx/jsx 分别并入
+ * typescript/javascript；toml 复用 ini；html 复用 xml。
+ */
+const LANG_BY_EXTENSION: Readonly<Record<string, string>> = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'typescript',
+  py: 'python',
+  go: 'go',
+  rs: 'rust',
+  java: 'java',
+  c: 'c',
+  h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  yaml: 'yaml', yml: 'yaml',
+  json: 'json',
+  toml: 'ini',
+  md: 'markdown', markdown: 'markdown',
+  html: 'xml', htm: 'xml', xml: 'xml',
+  css: 'css',
+  sql: 'sql',
+}
+
+/**
+ * 按扩展名映射语法着色语言；无映射返回 null（预览退回纯文本不着色）。
+ * @param name - 文件名或相对路径（只看最后一段）。
+ */
+export function langFor(name: string): string | null {
+  return LANG_BY_EXTENSION[extensionOf(name)] ?? null
+}
+
+/**
  * 图片扩展名 → MIME。建 blob 时显式给 type：File System Access 的 getFile()
  * 不一定带正确 type（svg 缺 type 时 <img> 渲染不出）。
  * @param name - 文件名或相对路径。

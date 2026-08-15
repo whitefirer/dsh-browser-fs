@@ -14,6 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import WebSocket, { WebSocketServer } from 'ws'
@@ -21,6 +22,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   DEFAULT_WS_PATH,
+  highlightModulePath,
   parseBrowserFrame,
   type CallFrame,
   type FsOp,
@@ -381,6 +383,30 @@ export function apply(ctx: HostContext, config?: Config): void {
       res.end('upgrade required')
     },
   }), 'browser-fs: ws probe route')
+
+  // 语法高亮懒加载 chunk（与 WS 通道同目录的 highlight.mjs）：client 半预览
+  // 首次命中已映射语言时动态 import。随插件包分发，启动时读一次驻内存；
+  // 文件缺失（旧安装未重 build）则不注册路由，client 侧退回纯文本预览。
+  let highlightBody: Buffer | null = null
+  try {
+    highlightBody = readFileSync(new URL('./highlight.mjs', import.meta.url))
+  } catch {
+    highlightBody = null
+  }
+  if (highlightBody !== null) {
+    const body = highlightBody
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'exact',
+      path: highlightModulePath(wsPath),
+      handler: (_req, res) => {
+        res.writeHead(200, {
+          'content-type': 'text/javascript; charset=utf-8',
+          'cache-control': 'no-cache',
+        })
+        res.end(body)
+      },
+    }), 'browser-fs: highlight module route')
+  }
 
   ctx.effect(() => () => relay.close(), 'browser-fs: relay teardown')
 

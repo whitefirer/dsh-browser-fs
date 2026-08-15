@@ -9,6 +9,10 @@
  *    `window.__ModuleLoader__.load({ id, factory })`，external 仅限
  *    dsh 模块表能回答的 platform modules（react / react/jsx-runtime）；
  *    其余（本包自己的 wire/fs/store/ui）全部 inline。
+ *  - lib/highlight.mjs — 语法高亮懒加载 chunk（ESM）：hljs 核心 + 语言子集
+ *    + 暗色主题 CSS（.css 以 text loader 内联成字符串，运行时注入 <style>）。
+ *    不进 client.js（体积考量），host 半经 /browser-fs/highlight.mjs 路由
+ *    供给，client 首次预览已映射语言的文件时才动态 import。
  */
 import { build } from 'esbuild'
 
@@ -59,3 +63,17 @@ await build({
 })
 
 console.log('build ok: lib/index.js (host, esm) + lib/client.js (browser, cjs closure)')
+
+// 语法高亮懒加载 chunk：独立 ESM 产物，不经 __ModuleLoader__ 包装（host 半
+// 静态路由直供，client 原生动态 import）。CSS 以文本内联，运行时注入。
+await build({
+  ...shared,
+  entryPoints: ['src/client/highlight.ts'],
+  outfile: 'lib/highlight.mjs',
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2022',
+  loader: { '.css': 'text' },
+})
+
+console.log('build ok: lib/highlight.mjs (browser, esm lazy chunk)')

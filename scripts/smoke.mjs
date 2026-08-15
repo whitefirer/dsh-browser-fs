@@ -14,6 +14,7 @@ const pluginUrl = pathToFileURL(process.argv[2] ?? resolve('lib/index.js')).href
 const plugin = await import(pluginUrl)
 
 const tools = new Map()
+const httpRoutes = new Map()
 let upgradeHandler = null
 const disposers = []
 const ctx = {
@@ -22,7 +23,7 @@ const ctx = {
     if (typeof dispose === 'function') disposers.push(dispose)
   },
   webServer: {
-    register() { return () => {} },
+    register(route) { httpRoutes.set(route.path, route); return () => {} },
     registerUpgrade(route) { upgradeHandler = route.handler; return () => {} },
   },
   tools: {
@@ -31,7 +32,14 @@ const ctx = {
 }
 plugin.apply(ctx, { wsPath: '/browser-fs/ws', requestTimeoutMs: 3000 })
 
-const server = createServer((_req, res) => { res.writeHead(404); res.end() })
+const server = createServer((req, res) => {
+  const route = httpRoutes.get(new URL(req.url ?? '/', 'http://x').pathname)
+  if (route !== undefined) {
+    void route.handler(req, res)
+    return
+  }
+  res.writeHead(404); res.end()
+})
 server.on('upgrade', (req, socket, head) => { upgradeHandler(req, socket, head) })
 await new Promise(resolve => { server.listen(0, '127.0.0.1', resolve) })
 const port = server.address().port
@@ -45,6 +53,13 @@ const check = (name, cond) => {
 }
 
 check('three tools registered', ['browser_fs_list', 'browser_fs_read', 'browser_fs_write'].every(n => tools.has(n)))
+
+// 语法高亮懒加载 chunk 的静态路由（host 半注册 exact HTTP 行供给 lib/highlight.mjs）
+const hlRes = await fetch(`http://127.0.0.1:${String(port)}/browser-fs/highlight.mjs`)
+const hlBody = await hlRes.text()
+check('highlight module route', hlRes.status === 200
+  && (hlRes.headers.get('content-type') ?? '').includes('javascript')
+  && hlBody.includes('highlightCode'))
 
 const exec = { signal: new AbortController().signal }
 
@@ -158,6 +173,7 @@ await new Promise((resolve) => {
     MAX_IMAGE_PREVIEW_BYTES,
     TEXT_PREVIEW_BYTES,
     imageMimeFor,
+    langFor,
     looksBinary,
     previewKindFor,
   } = await import(previewUrl.href)
@@ -218,6 +234,13 @@ await new Promise((resolve) => {
   check('preview binary sniff', looksBinary('ab\0c') && !looksBinary('你好，世界'))
   check('preview image mime', imageMimeFor('x.svg') === 'image/svg+xml' && imageMimeFor('x.JPG') === 'image/jpeg')
   check('preview limits', MAX_IMAGE_PREVIEW_BYTES === 8 * 1024 * 1024 && TEXT_PREVIEW_BYTES === 64 * 1024)
+  // 语法着色的语言映射：常见扩展名命中 hljs 语言 id；无映射退回 null（不着色）
+  check('preview lang mapping', langFor('a/b/app.TSX') === 'typescript'
+    && langFor('x.py') === 'python' && langFor('x.yaml') === 'yaml'
+    && langFor('x.toml') === 'ini' && langFor('x.html') === 'xml'
+    && langFor('x.h') === 'cpp' && langFor('x.sql') === 'sql')
+  check('preview lang fallback', langFor('archive.zip') === null
+    && langFor('Makefile') === null && langFor('.gitignore') === null)
 
   // write：只读拒绝，文案明确
   await backend.write({ path: 'x', content: 'y' }, new AbortController().signal).then(

@@ -68,6 +68,18 @@ dsh plugin --profile web add file:/abs/path/to/dsh-browser-fs
 
 预览两模式同路径（完整/兼容后端的 `readBlob` 各自实现），兼容模式只读也能用。
 
+文本预览带**语法着色**：按扩展名映射语言（js/ts/tsx/py/go/rs/java/c/cpp/h/sh/
+yaml/json/toml/md/html/css/xml/sql 等，无映射退回纯文本），先截断前 64KB 再
+着色。高亮基于 highlight.js 语言子集 + GitHub Dark 主题；为控制主包体积拆成
+独立 chunk —— host 半经 `/browser-fs/ws` 同目录的 `highlight.mjs` 路由供给，
+预览首次命中已映射语言时才动态加载（加载中先出纯文本并标注「语法着色加载中…」，
+失败静默退回纯文本）。
+
+**卡片可拖拽换位**：标题行是拖拽把手（鼠标/触摸均可，位移 >4px 才算拖拽，
+不会吃掉折叠与按钮点击）；位置记忆在 localStorage（`dsh-browser-fs:card-pos`），
+拖动结束与窗口 resize 时自动 clamp 回视口（至少留 48px 可见）。收起态的
+📁 圆钮不参与拖拽，固定在右下角。
+
 授权按钮行末尾的「↻」是刷新目录：
 
 - **完整模式**：清空目录树全部缓存（展开集合/已加载层级）并重拉根级；
@@ -122,15 +134,16 @@ File System Access API 是安全上下文门控 API：只在 HTTPS 或 localhost
 - **标签页必须开着**：没有浏览器标签在线时，工具调用立即返回明确错误；
   有标签但没授权目录时同样立即报错。
 - agent 工具只支持 UTF-8 文本读写（二进制写入不在范围；图片仅卡片内预览，见「预览与刷新」）。
-- client 半固定连默认 WS 路径 `/browser-fs/ws`；host 半若改了 `wsPath` 配置，
-  client 半的 `DEFAULT_WS_PATH`（`src/wire.ts`）需同步修改并重新 build。
+- client 半固定连默认 WS 路径 `/browser-fs/ws`（高亮 chunk 路径由其同目录
+  派生 `/browser-fs/highlight.mjs`）；host 半若改了 `wsPath` 配置，client 半的
+  `DEFAULT_WS_PATH`（`src/wire.ts`）需同步修改并重新 build。
 - host 半以 peerDependency 依赖 `@deepseek-ai/dsh-tools`（defineTool），运行时经
   profile 的扁平 node_modules 回退解析到 dsh 安装自带的同一份。
 
 ## 开发
 
 ```sh
-npm run build      # esbuild：host 半 ESM + client 半 CJS 闭包（__ModuleLoader__ 包装）
+npm run build      # esbuild：host 半 ESM + client 半 CJS 闭包（__ModuleLoader__ 包装）+ 高亮懒加载 chunk（lib/highlight.mjs）
 npm run typecheck  # tsc --noEmit
 npm run smoke      # 链路自检：call→result 往返 / abort / 断连 / 跨源拒绝（scripts/smoke.mjs）
 ```

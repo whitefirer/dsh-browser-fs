@@ -14,6 +14,20 @@
 /** WS 通道的默认精确 pathname（host 半 config.wsPath 可覆盖；client 半固定用默认值）。 */
 export const DEFAULT_WS_PATH = '/browser-fs/ws'
 
+/**
+ * 语法高亮模块（懒加载 ESM chunk）的 HTTP pathname：与 WS 通道同目录下的
+ * highlight.mjs。host 半按生效的 wsPath 派生并注册静态路由；client 半固定用
+ * DEFAULT_WS_PATH 派生（与 WS 同一约定：改 wsPath 时两侧需同步）。
+ * @param wsPath - 生效的 WS 通道路径。
+ */
+export function highlightModulePath(wsPath: string): string {
+  const slash = wsPath.lastIndexOf('/')
+  return `${slash <= 0 ? '' : wsPath.slice(0, slash)}/highlight.mjs`
+}
+
+/** client 半固定使用的高亮模块路径（由 DEFAULT_WS_PATH 派生）。 */
+export const DEFAULT_HIGHLIGHT_PATH = highlightModulePath(DEFAULT_WS_PATH)
+
 /** 浏览器端可执行的文件操作。 */
 export type FsOp = 'list' | 'read' | 'write'
 
