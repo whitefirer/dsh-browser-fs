@@ -40,9 +40,14 @@ dsh plugin --profile web add file:/abs/path/to/dsh-browser-fs
 
 ## 使用
 
-1. 打开 dsh web 页面，右下角出现「browser-fs 浏览器文件」卡片；
+1. 打开 dsh web 页面，右下角出现「browser-fs 浏览器文件」卡片（未授权时默认展开；
+   授权后默认折叠成 📁 圆钮，点圆钮展开，「—」收起；折叠状态存 localStorage，
+   刷新保持，圆钮上的状态点颜色与卡片一致）；
 2. 点「授权目录」，在系统选择器里选一个本地目录（需要 readwrite 权限）；
-3. 之后 agent 即可使用三个工具：
+3. 卡片上的「目录内容」区可直接浏览授权目录：懒加载树（点目录行展开/收起，
+   每级上限 200 条，超出显示「…还有 N 项」），文件行显示大小并带「复制路径」
+   按钮（复制相对路径，方便贴给 AI）；
+4. 之后 agent 即可使用三个工具：
    - `browser_fs_list { path?, recursive? }` — 列目录（相对路径/类型/大小，递归可选）
    - `browser_fs_read { path, maxBytes? }` — 读文本文件（默认上限 256 KiB，截断会标注）
    - `browser_fs_write { path, content }` — 写文本文件（自动创建父目录，返回字节数）

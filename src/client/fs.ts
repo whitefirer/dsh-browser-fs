@@ -71,6 +71,60 @@ function describeFsError(path: string, error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+/**
+ * 从根句柄逐级取到某个子目录句柄（每次调用重新走 getDirectoryHandle，
+ * 容忍外部 revoke/变化后拿到最新状态）。供目录树展开用。
+ * @param root - 已授权根目录句柄。
+ * @param path - 相对根的路径（空串为根自身）。
+ * @returns 目标目录句柄。
+ */
+export async function resolveDir(root: FileSystemDirectoryHandle, path: string): Promise<FileSystemDirectoryHandle> {
+  try {
+    return await walkDir(root, splitPath(path), false)
+  } catch (error) {
+    throw describeFsError(path === '' ? '(root)' : path, error)
+  }
+}
+
+/** 目录树单级条目。 */
+export interface LevelEntry {
+  name: string
+  kind: 'file' | 'directory'
+  size?: number
+}
+
+/** 目录树单级列举结果：截断后的条目 + 该级真实总条目数。 */
+export interface LevelResult {
+  entries: LevelEntry[]
+  total: number
+}
+
+/**
+ * 列举一个目录的直接子级：目录在前文件在后、各自按名字排序；只取前 limit
+ * 条（条目带文件大小），total 记录该级全部条目数供「…还有 N 项」显示。
+ * @param dir - 目标目录句柄。
+ * @param limit - 返回条目上限。
+ * @returns 截断条目与总数。
+ */
+export async function listLevel(dir: FileSystemDirectoryHandle, limit: number): Promise<LevelResult> {
+  const all: { name: string; kind: 'file' | 'directory'; handle: FileSystemDirectoryHandle | FileSystemFileHandle }[] = []
+  for await (const handle of dir.values()) {
+    all.push({ name: handle.name, kind: handle.kind, handle })
+  }
+  all.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'directory' ? -1 : 1) || a.name.localeCompare(b.name))
+  const sliced = all.slice(0, limit)
+  const entries: LevelEntry[] = []
+  for (const item of sliced) {
+    if (item.kind === 'directory') {
+      entries.push({ name: item.name, kind: 'directory' })
+    } else {
+      const file = await (item.handle as FileSystemFileHandle).getFile()
+      entries.push({ name: item.name, kind: 'file', size: file.size })
+    }
+  }
+  return { entries, total: all.length }
+}
+
 async function listOp(root: FileSystemDirectoryHandle, args: Record<string, unknown>, signal: AbortSignal): Promise<ListResult> {
   const path = asString(args.path, 'path') ?? ''
   const recursive = args.recursive === true

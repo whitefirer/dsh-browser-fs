@@ -31,12 +31,28 @@ interface ClientCtx {
  * @param ctx - client 根上下文。
  */
 export function apply(ctx: ClientCtx): void {
+  const COLLAPSED_KEY = 'dsh-browser-fs:collapsed'
+  const storedCollapsed = ((): boolean | null => {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_KEY)
+      return raw === null ? null : raw === '1'
+    } catch {
+      // 隐私模式等场景 localStorage 不可用：当作无存储偏好。
+      return null
+    }
+  })()
+  // 用户显式收起/展开过（含上次刷新留下的存储值）后不再随权限状态改默认值。
+  let collapseTouched = storedCollapsed !== null
+
   let state: BrowserFsState = {
     wsConnected: false,
     permission: 'none',
     dirName: null,
     busy: false,
     error: null,
+    collapsed: storedCollapsed ?? false,
+    root: null,
+    rootVersion: 0,
   }
   const listeners = new Set<() => void>()
   const setState = (patch: Partial<BrowserFsState>): void => {
@@ -45,6 +61,13 @@ export function apply(ctx: ClientCtx): void {
   }
 
   let handle: FileSystemDirectoryHandle | null = null
+  let rootVersion = 0
+  /** 句柄变更的统一入口：同步 snapshot 里的 root 引用并 bump 版本（目录树据此重置）。 */
+  const setHandle = (next: FileSystemDirectoryHandle | null): void => {
+    handle = next
+    rootVersion += 1
+    setState({ root: next, rootVersion })
+  }
   let ws: WebSocket | null = null
   let disposed = false
   let retryMs = 1000
@@ -132,8 +155,11 @@ export function apply(ctx: ClientCtx): void {
       setState({ permission: 'none', dirName: null })
       return
     }
-    handle = stored
+    setHandle(stored)
     const permission = await stored.queryPermission({ mode: 'readwrite' })
+    // 无存储偏好时的默认折叠：未授权（none，无句柄走上面的早退分支，初始即展开）
+    // 保持展开引导授权；有句柄（granted/prompt/denied）默认折叠。
+    if (!collapseTouched) setState({ collapsed: true })
     setState({ permission, dirName: stored.name })
     sendState()
   }
@@ -167,9 +193,10 @@ export function apply(ctx: ClientCtx): void {
         setState({ busy: true, error: null })
         try {
           if (handle === null) {
-            handle = await showDirectoryPicker({ mode: 'readwrite' })
-            await saveHandle(handle)
-            setState({ permission: 'granted', dirName: handle.name })
+            const picked = await showDirectoryPicker({ mode: 'readwrite' })
+            setHandle(picked)
+            await saveHandle(picked)
+            setState({ permission: 'granted', dirName: picked.name })
           } else {
             const permission = await handle.requestPermission({ mode: 'readwrite' })
             setState({ permission, dirName: handle.name })
@@ -194,9 +221,10 @@ export function apply(ctx: ClientCtx): void {
         }
         setState({ busy: true, error: null })
         try {
-          handle = await showDirectoryPicker({ mode: 'readwrite' })
-          await saveHandle(handle)
-          setState({ permission: 'granted', dirName: handle.name })
+          const picked = await showDirectoryPicker({ mode: 'readwrite' })
+          setHandle(picked)
+          await saveHandle(picked)
+          setState({ permission: 'granted', dirName: picked.name })
           sendState()
         } catch (error) {
           if (!(error instanceof DOMException && error.name === 'AbortError')) {
@@ -209,11 +237,22 @@ export function apply(ctx: ClientCtx): void {
     },
     revoke(): void {
       void (async () => {
-        handle = null
+        setHandle(null)
         await clearHandle()
         setState({ permission: 'none', dirName: null, error: null })
         sendState()
       })()
+    },
+    /** 收起/展开卡片；显式选择写 localStorage，此后不再随权限状态改默认值。 */
+    toggleCollapsed(): void {
+      const collapsed = !state.collapsed
+      collapseTouched = true
+      try {
+        localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0')
+      } catch {
+        // localStorage 不可用时折叠状态只在本次页面存活。
+      }
+      setState({ collapsed })
     },
   }
 
