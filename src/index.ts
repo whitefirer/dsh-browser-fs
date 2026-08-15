@@ -67,6 +67,8 @@ interface Conn {
   hasHandle: boolean
   /** 已授权根目录显示名。 */
   dirName: string | null
+  /** 设备标签（state 帧携带；空串表示对端尚未上报）。 */
+  label: string
 }
 
 /** 一次等待浏览器回包的调用。 */
@@ -77,6 +79,12 @@ interface Pending {
   readonly resolve: (value: unknown) => void
   readonly reject: (error: Error) => void
   readonly timer: NodeJS.Timeout
+}
+
+/** 一次调用的完整回包：浏览器端 JSON 值 + 执行者设备标签。 */
+interface CallOutcome {
+  readonly value: unknown
+  readonly device: string
 }
 
 /**
@@ -138,22 +146,21 @@ class BrowserRelay {
    * @param op - 文件操作。
    * @param args - 操作参数。
    * @param signal - 调用方（工具 registry）的取消信号。
-   * @returns 浏览器端回传的 JSON 值。
+   * @returns 浏览器端回传的 JSON 值 + 执行者设备标签。
    */
-  call(op: FsOp, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  call(op: FsOp, args: Record<string, unknown>, signal: AbortSignal): Promise<CallOutcome> {
     const conn = this.pickExecutor()
     if (conn === undefined) {
       if (this.conns.size === 0) {
         return Promise.reject(new Error(
-          'browser-fs: no dsh web tab is connected — open the dsh page in a browser first '
-          + '(these tools operate on the browser machine\'s local files and need a live tab)',
+          'browser-fs: dsh 页面未在任何设备打开（这些工具操作的是浏览器所在机器的本地文件，需要一个在线标签页）',
         ))
       }
       return Promise.reject(new Error(
-        'browser-fs: no connected tab has an authorized local directory — '
-        + 'click the browser-fs card in the dsh web page to grant one',
+        'browser-fs: 没有设备持有授权目录（请在 dsh 页面的 browser-fs 卡片里授权）',
       ))
     }
+    const device = conn.label === '' ? '未命名设备' : conn.label
     const rpcId = randomUUID()
     return new Promise((resolve, reject) => {
       const onAbort = (): void => {
@@ -167,7 +174,7 @@ class BrowserRelay {
       }
       const timer = setTimeout(() => {
         if (this.settle(rpcId) === undefined) return
-        reject(new Error(`browser-fs: browser tab did not respond within ${String(this.requestTimeoutMs)}ms`))
+        reject(new Error(`browser-fs: 设备「${device}」未在 ${String(this.requestTimeoutMs)}ms 内响应`))
       }, this.requestTimeoutMs)
       this.pending.set(rpcId, { conn, signal, onAbort, resolve, reject, timer })
       if (signal.aborted) {
@@ -181,6 +188,8 @@ class BrowserRelay {
         if (this.settle(rpcId) !== undefined) reject(error instanceof Error ? error : new Error(String(error)))
       }
     })
+    // 结果帧在 accept 的 message 回调里 resolve 原始 value；这里补上设备标签。
+      .then(value => ({ value, device }))
   }
 
   /** 取出并清理一次挂起调用（计时器 + abort 监听）；已完结返回 undefined。 */
@@ -207,40 +216,70 @@ class BrowserRelay {
   }
 
   private accept(ws: WebSocket): void {
-    const conn: Conn = { id: randomUUID(), ws, hasHandle: false, dirName: null }
+    const conn: Conn = { id: randomUUID(), ws, hasHandle: false, dirName: null, label: '' }
     this.conns.add(conn)
+    // 新连接立刻补一份当前 roster，不必等别人变更。
+    this.sendRoster(conn)
     ws.on('message', (data: WebSocket.RawData) => {
       const frame = parseBrowserFrame(data.toString())
       if (frame === null) return
       if (frame.type === 'state') {
         conn.hasHandle = frame.hasHandle
         conn.dirName = frame.dirName
+        conn.label = frame.label
+        this.broadcastRoster()
         return
       }
       const entry = this.settle(frame.rpcId)
       if (entry === undefined || entry.conn !== conn) return
+      const device = conn.label === '' ? '未命名设备' : conn.label
       if (frame.ok) entry.resolve(frame.value)
-      else entry.reject(new Error(frame.error ?? 'browser-fs: browser-side call failed'))
+      else entry.reject(new Error(`${frame.error ?? 'browser-fs: browser-side call failed'}（设备：${device}）`))
     })
     const drop = (): void => {
       this.conns.delete(conn)
       for (const rpcId of [...this.pending.keys()]) {
         const entry = this.pending.get(rpcId)
         if (entry === undefined || entry.conn !== conn) continue
-        this.settle(rpcId)?.reject(new Error('browser-fs: browser tab disconnected mid-call'))
+        const device = conn.label === '' ? '未命名设备' : conn.label
+        this.settle(rpcId)?.reject(new Error(`browser-fs: 设备「${device}」的标签页在调用中途断开`))
       }
+      this.broadcastRoster()
     }
     ws.once('close', drop)
     ws.once('error', drop)
   }
 
-  /** Set 迭代序即插入序；取最后声明 hasHandle 的连接（最近授权的标签页优先）。 */
-  private pickExecutor(): Conn | undefined {
-    let chosen: Conn | undefined
+  /** 组装当前执行者名单（仅 hasHandle=true 的连接进 executors）。 */
+  private rosterFrame(): string {
+    const executors = [...this.conns]
+      .filter(conn => conn.hasHandle)
+      .map(conn => ({ label: conn.label === '' ? '未命名设备' : conn.label, dirName: conn.dirName }))
+    return JSON.stringify({ type: 'roster', executors })
+  }
+
+  /** 向全部在线连接广播 roster（任一连接 state 变化/断连时调用）。 */
+  private broadcastRoster(): void {
+    const raw = this.rosterFrame()
     for (const conn of this.conns) {
-      if (conn.hasHandle) chosen = conn
+      if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(raw)
     }
-    return chosen
+  }
+
+  /** 向单条连接发送 roster（新连接接入时的初始名单）。 */
+  private sendRoster(conn: Conn): void {
+    if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(this.rosterFrame())
+  }
+
+  /**
+   * Set 迭代序即插入序：取第一个声明 hasHandle 的连接 —— 多台设备同时
+   * 持柄在线时执行者确定（先接入者先得），不会逐次调用漂移。
+   */
+  private pickExecutor(): Conn | undefined {
+    for (const conn of this.conns) {
+      if (conn.hasHandle) return conn
+    }
+    return undefined
   }
 
   private send(conn: Conn, frame: CallFrame | { type: 'cancel'; rpcId: string }): void {
@@ -280,17 +319,23 @@ interface Entry {
 interface ListValue {
   entries: Entry[]
   truncated: boolean
+  /** 执行者设备标签（host 侧注入，浏览器不回传）。 */
+  device: string
 }
 
 interface ReadValue {
   content: string
   size: number
   truncated: boolean
+  /** 执行者设备标签（host 侧注入，浏览器不回传）。 */
+  device: string
 }
 
 interface WriteValue {
   path: string
   bytes: number
+  /** 执行者设备标签（host 侧注入，浏览器不回传）。 */
+  device: string
 }
 
 const NOT_HOST_FS = ' This operates on the local disk of the machine running the browser '
@@ -369,6 +414,7 @@ export function apply(ctx: HostContext, config?: Config): void {
             },
           },
           truncated: { type: 'boolean', required: true },
+          device: { type: 'string', required: true },
         },
       },
       render: (args, value) => {
@@ -376,17 +422,17 @@ export function apply(ctx: HostContext, config?: Config): void {
         const lines = value.entries.map(entry => entry.kind === 'directory'
           ? `${entry.path}/`
           : `${entry.path}${entry.size === undefined ? '' : ` (${String(entry.size)} B)`}`)
-        const head = `${String(value.entries.length)} entries under ${base}${value.truncated ? ' (truncated)' : ''}:`
+        const head = `${base} 共 ${String(value.entries.length)} 条（设备：${value.device}${value.truncated ? '，已截断' : ''}）：`
         return text([head, ...lines].join('\n'))
       },
     },
     isConcurrencySafe: () => true,
     async execute(args, exec: ToolRunContext) {
-      const value = await relay.call('list', {
+      const outcome = await relay.call('list', {
         ...(args.path !== undefined ? { path: args.path } : {}),
         ...(args.recursive !== undefined ? { recursive: args.recursive } : {}),
       }, exec.signal)
-      return value as ListValue
+      return { ...(outcome.value as Omit<ListValue, 'device'>), device: outcome.device }
     },
   })), 'browser-fs: browser_fs_list')
 
@@ -408,22 +454,21 @@ export function apply(ctx: HostContext, config?: Config): void {
           content: { type: 'string', required: true },
           size: { type: 'integer', required: true },
           truncated: { type: 'boolean', required: true },
+          device: { type: 'string', required: true },
         },
       },
       render: (args, value) => {
-        const prefix = value.truncated
-          ? `[truncated: showing first part of ${String(value.size)} bytes of ${args.path}]\n`
-          : ''
+        const prefix = `[设备：${value.device} · ${args.path} 共 ${String(value.size)} 字节${value.truncated ? '，已截断' : ''}]\n`
         return text(`${prefix}${value.content}`)
       },
     },
     isConcurrencySafe: () => true,
     async execute(args, exec: ToolRunContext) {
-      const value = await relay.call('read', {
+      const outcome = await relay.call('read', {
         path: args.path,
         ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}),
       }, exec.signal)
-      return value as ReadValue
+      return { ...(outcome.value as Omit<ReadValue, 'device'>), device: outcome.device }
     },
   })), 'browser-fs: browser_fs_read')
 
@@ -444,13 +489,14 @@ export function apply(ctx: HostContext, config?: Config): void {
         properties: {
           path: { type: 'string', required: true },
           bytes: { type: 'integer', required: true },
+          device: { type: 'string', required: true },
         },
       },
-      render: (_args, value) => text(`Wrote ${String(value.bytes)} bytes to ${value.path}`),
+      render: (_args, value) => text(`已写入 ${String(value.bytes)} 字节到 ${value.path}（设备：${value.device}）`),
     },
     async execute(args, exec: ToolRunContext) {
-      const value = await relay.call('write', { path: args.path, content: args.content }, exec.signal)
-      return value as WriteValue
+      const outcome = await relay.call('write', { path: args.path, content: args.content }, exec.signal)
+      return { ...(outcome.value as Omit<WriteValue, 'device'>), device: outcome.device }
     },
   })), 'browser-fs: browser_fs_write')
 }

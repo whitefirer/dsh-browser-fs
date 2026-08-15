@@ -31,7 +31,21 @@ export interface CancelFrame {
   readonly rpcId: string
 }
 
-export type HostFrame = CallFrame | CancelFrame
+/** roster 里的一台执行者设备（hasHandle=true 的连接）。 */
+export interface RosterExecutor {
+  /** 设备标签（昵称优先，其次 UA 派生）。 */
+  readonly label: string
+  /** 该设备已授权的目录名。 */
+  readonly dirName: string | null
+}
+
+/** host → browser：执行者名单广播（任一连接 state 变化/断连/新连接时全量推送）。 */
+export interface RosterFrame {
+  readonly type: 'roster'
+  readonly executors: readonly RosterExecutor[]
+}
+
+export type HostFrame = CallFrame | CancelFrame | RosterFrame
 
 /** browser → host：一次调用的完结。 */
 export interface ResultFrame {
@@ -50,6 +64,8 @@ export interface StateFrame {
   readonly hasHandle: boolean
   /** 已授权根目录的显示名（未授权为 null）。 */
   readonly dirName: string | null
+  /** 设备标签（昵称 > UA 派生；缺省为空串，host 侧兜底「未命名设备」）。 */
+  readonly label: string
 }
 
 export type BrowserFrame = ResultFrame | StateFrame
@@ -87,6 +103,7 @@ export function parseBrowserFrame(raw: string): BrowserFrame | null {
       type: 'state',
       hasHandle: value.hasHandle,
       dirName: typeof value.dirName === 'string' ? value.dirName : null,
+      label: typeof value.label === 'string' ? value.label : '',
     }
   }
   return null
@@ -114,6 +131,17 @@ export function parseHostFrame(raw: string): HostFrame | null {
   }
   if (value.type === 'cancel' && typeof value.rpcId === 'string') {
     return { type: 'cancel', rpcId: value.rpcId }
+  }
+  if (value.type === 'roster' && Array.isArray(value.executors)) {
+    const executors: RosterExecutor[] = []
+    for (const entry of value.executors as unknown[]) {
+      if (!isRecord(entry) || typeof entry.label !== 'string') return null
+      executors.push({
+        label: entry.label,
+        dirName: typeof entry.dirName === 'string' ? entry.dirName : null,
+      })
+    }
+    return { type: 'roster', executors }
   }
   return null
 }

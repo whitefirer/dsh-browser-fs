@@ -9,7 +9,8 @@
  * @module dsh-browser-fs/client
  */
 
-import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame } from '../wire.js'
+import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame, type RosterExecutor } from '../wire.js'
+import { deriveDeviceLabel } from './device.js'
 import { executeOp } from './fs.js'
 import { clearHandle, loadHandle, saveHandle } from './store.js'
 import { createCard, type BrowserFsState } from './ui.js'
@@ -44,6 +45,18 @@ export function apply(ctx: ClientCtx): void {
   // 用户显式收起/展开过（含上次刷新留下的存储值）后不再随权限状态改默认值。
   let collapseTouched = storedCollapsed !== null
 
+  /** 设备昵称（localStorage）；空串/读取失败视为未设置。 */
+  const storedNickname = ((): string | null => {
+    try {
+      const raw = localStorage.getItem('dsh-browser-fs:device-name')
+      return raw === null || raw.trim() === '' ? null : raw
+    } catch {
+      return null
+    }
+  })()
+  /** UA 派生标签（昵称的兜底）。 */
+  const derivedLabel = deriveDeviceLabel(navigator.userAgent)
+
   let state: BrowserFsState = {
     wsConnected: false,
     permission: 'none',
@@ -53,6 +66,9 @@ export function apply(ctx: ClientCtx): void {
     collapsed: storedCollapsed ?? false,
     root: null,
     rootVersion: 0,
+    label: storedNickname ?? derivedLabel,
+    nickname: storedNickname,
+    executors: [],
   }
   const listeners = new Set<() => void>()
   const setState = (patch: Partial<BrowserFsState>): void => {
@@ -77,13 +93,14 @@ export function apply(ctx: ClientCtx): void {
   /** 只有「句柄在手 + readwrite 已授予」才算可执行。 */
   const ready = (): boolean => handle !== null && state.permission === 'granted'
 
-  /** 向 host 广播当前授权状态（host 据此挑执行者）。 */
+  /** 向 host 广播当前授权状态 + 设备标签（host 据此挑执行者并维护 roster）。 */
   const sendState = (): void => {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'state',
         hasHandle: ready(),
         dirName: ready() ? state.dirName : null,
+        label: state.label,
       }))
     }
   }
@@ -117,6 +134,10 @@ export function apply(ctx: ClientCtx): void {
   const onMessage = (raw: string): void => {
     const frame = parseHostFrame(raw)
     if (frame === null) return
+    if (frame.type === 'roster') {
+      setState({ executors: [...frame.executors] })
+      return
+    }
     if (frame.type === 'cancel') {
       inflight.get(frame.rpcId)?.abort()
       return
@@ -140,7 +161,7 @@ export function apply(ctx: ClientCtx): void {
     sock.onclose = () => {
       if (ws === sock) {
         ws = null
-        setState({ wsConnected: false })
+        setState({ wsConnected: false, executors: [] })
       }
       if (!disposed) retryTimer = setTimeout(connect, retryMs)
       retryMs = Math.min(retryMs * 2, 10_000)
@@ -253,6 +274,19 @@ export function apply(ctx: ClientCtx): void {
         // localStorage 不可用时折叠状态只在本次页面存活。
       }
       setState({ collapsed })
+    },
+    /** 设置设备昵称（空串清除昵称，回落到 UA 派生标签）；写 localStorage 并重新广播 state。 */
+    setDeviceName(name: string): void {
+      const trimmed = name.trim()
+      const nickname = trimmed === '' ? null : trimmed
+      try {
+        if (nickname === null) localStorage.removeItem('dsh-browser-fs:device-name')
+        else localStorage.setItem('dsh-browser-fs:device-name', nickname)
+      } catch {
+        // localStorage 不可用：昵称只在本次页面存活。
+      }
+      setState({ nickname, label: nickname ?? derivedLabel })
+      sendState()
     },
   }
 

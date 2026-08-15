@@ -14,6 +14,7 @@
 
 import { useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
+import type { RosterExecutor } from '../wire.js'
 import { listLevel, resolveDir } from './fs.js'
 
 /** 卡片可见的全部状态（apply 闭包里的单一数据源）。 */
@@ -34,6 +35,12 @@ export interface BrowserFsState {
   root: FileSystemDirectoryHandle | null
   /** 句柄代际：每次换目录/解除授权 +1，作目录树的重置 key。 */
   rootVersion: number
+  /** 生效中的设备标签（昵称 ?? UA 派生）。 */
+  label: string
+  /** 用户设置的昵称（null 表示用 UA 派生）。 */
+  nickname: string | null
+  /** host 广播的执行者名单（仅持有授权的设备；本机持柄时也含本机）。 */
+  executors: RosterExecutor[]
 }
 
 /** 卡片动作（授权必须经过用户手势，全部挂按钮点击）。 */
@@ -46,6 +53,8 @@ export interface CardActions {
   revoke(): void
   /** 收起成圆钮 / 展开回卡片。 */
   toggleCollapsed(): void
+  /** 设置设备昵称（空串清除，回落 UA 派生）。 */
+  setDeviceName(name: string): void
 }
 
 /** 卡片数据源：订阅 + 快照 + 动作。 */
@@ -111,10 +120,19 @@ function statusColor(state: BrowserFsState): string {
 function statusText(state: BrowserFsState): string {
   if (!state.wsConnected) return '未连接宿主（重连中）'
   switch (state.permission) {
-    case 'granted': return `已授权：${state.dirName ?? ''}`
+    case 'granted': return `已授权：${state.dirName ?? ''}（本机：${state.label}）`
     case 'prompt': return '目录权限待确认'
     case 'denied': return '目录权限被拒绝'
-    case 'none': return '未授权目录'
+    case 'none': {
+      // 本机没授权但 roster 里有持柄设备：告诉用户授权落在哪台设备上。
+      if (state.executors.length > 0) {
+        const whom = state.executors
+          .map(executor => `${executor.label}${executor.dirName === null ? '' : `（${executor.dirName}）`}`)
+          .join('、')
+        return `当前授权在设备：${whom}`
+      }
+      return '未授权目录'
+    }
   }
 }
 
@@ -323,6 +341,8 @@ export function createCard(source: CardSource): () => ReactElement {
   return function BrowserFsCard(): ReactElement {
     const state = useSyncExternalStore(source.subscribe, source.getSnapshot)
     const { actions } = source
+    const [editingName, setEditingName] = useState(false)
+    const [draftName, setDraftName] = useState('')
 
     if (state.collapsed) {
       return (
@@ -331,6 +351,11 @@ export function createCard(source: CardSource): () => ReactElement {
           <StatusDot color={statusColor(state)} />
         </button>
       )
+    }
+
+    const saveName = (): void => {
+      actions.setDeviceName(draftName)
+      setEditingName(false)
     }
 
     return (
@@ -349,7 +374,45 @@ export function createCard(source: CardSource): () => ReactElement {
             —
           </button>
         </div>
-        <div style={{ marginBottom: '8px', opacity: 0.9 }}>{statusText(state)}</div>
+        <div style={{ marginBottom: '4px', opacity: 0.9 }}>{statusText(state)}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '8px', opacity: 0.85 }}>
+          {editingName
+            ? (
+              <>
+                <input
+                  autoFocus
+                  value={draftName}
+                  placeholder="留空用 UA 派生标签"
+                  style={{
+                    flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)',
+                    border: '1px solid rgba(255,255,255,0.25)', borderRadius: '6px',
+                    color: 'inherit', fontSize: '12px', padding: '2px 6px',
+                  }}
+                  onChange={event => { setDraftName(event.target.value) }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') saveName()
+                    if (event.key === 'Escape') setEditingName(false)
+                  }}
+                  onBlur={saveName}
+                />
+              </>
+            )
+            : (
+              <>
+                <span style={{ ...rowTextStyle, flex: 1 }} title={state.label}>本机：{state.label}</span>
+                <button
+                  style={{ ...buttonStyle, padding: '0 5px', fontSize: '10px', flexShrink: 0 }}
+                  title="编辑设备昵称"
+                  onClick={() => {
+                    setDraftName(state.nickname ?? '')
+                    setEditingName(true)
+                  }}
+                >
+                  ✏️
+                </button>
+              </>
+            )}
+        </div>
         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           {state.permission === 'granted'
             ? (

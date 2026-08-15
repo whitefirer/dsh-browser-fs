@@ -54,6 +54,21 @@ dsh plugin --profile web add file:/abs/path/to/dsh-browser-fs
 
 工具描述里明确告知模型：操作的是**浏览器机器**的本地盘，不是宿主机文件系统。
 
+## 多设备
+
+多台设备可以各自开着 dsh 页面，模型是「各自授权各自的本机目录」：
+
+- 每台设备的浏览器 tab 会自动派生一个设备标签（从 UA 解析，如
+  "Windows · Chrome" / "Android · Chrome" / "macOS · Safari"）；卡片上点 ✏️
+  可改昵称（存 localStorage `dsh-browser-fs:device-name`，昵称优先于 UA 派生）。
+- 每个 tab 把 `{hasHandle, dirName, label}` 上报给 host；host 维护执行者名单
+  （roster）并广播给所有在线 tab。没授权的设备会在卡片上看到
+  「当前授权在设备：某某（目录名）」，不会再一脸茫然。
+- agent 的工具调用路由到持柄设备：多台同时持柄时选**先接入的那台**（确定性的），
+  工具结果与错误文本都带执行设备标签（如「已写入 3 字节到 b.txt（设备：X）」），
+  在会话里能看出是哪台设备执行的。
+- 本机再授权一个目录就成为多执行者之一；某台设备断开或解除授权，roster 即时收缩。
+
 ## 限制
 
 - **secure context**：File System Access API 要求 HTTPS 或 localhost 上下文；
