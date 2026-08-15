@@ -146,9 +146,10 @@ await new Promise((resolve) => {
   evil.once('error', (e) => { check('cross-origin rejected', e.message.includes('403')); resolve() })
 })
 
-// 7. 兼容模式降级路径（headless）：esbuild 现场编译 files-backend/device/preview，
-// 用 Node 的全局 File 模拟 input 选中的文件列表（showDirectoryPicker 缺失的分支
-// 在浏览器侧由 pickerAvailable 特性检测驱动，这里覆盖后端行为本身与预览纯函数）。
+// 7. 兼容模式降级路径（headless）：esbuild 现场编译 files-backend/device/preview/
+// compat-picker，用 Node 的全局 File 模拟 input 选中的文件列表（showDirectoryPicker
+// 缺失的分支在浏览器侧由 pickerAvailable 特性检测驱动，这里覆盖后端行为本身、
+// 预览纯函数与选择器纯决策）。
 {
   const { build } = await import('esbuild')
   const { mkdtempSync } = await import('node:fs')
@@ -156,7 +157,12 @@ await new Promise((resolve) => {
   const { join } = await import('node:path')
   const out = join(mkdtempSync(join(tmpdir(), 'bfs-smoke-')), 'compat.mjs')
   await build({
-    entryPoints: ['src/client/files-backend.ts', 'src/client/device.ts', 'src/client/preview.ts'],
+    entryPoints: [
+      'src/client/files-backend.ts',
+      'src/client/device.ts',
+      'src/client/preview.ts',
+      'src/client/compat-picker.ts',
+    ],
     outdir: join(out, '..', 'compat-out'),
     bundle: true,
     format: 'esm',
@@ -166,6 +172,7 @@ await new Promise((resolve) => {
   const backendUrl = new URL(`file://${join(out, '..', 'compat-out', 'files-backend.js')}`)
   const deviceUrl = new URL(`file://${join(out, '..', 'compat-out', 'device.js')}`)
   const previewUrl = new URL(`file://${join(out, '..', 'compat-out', 'preview.js')}`)
+  const pickerUrl = new URL(`file://${join(out, '..', 'compat-out', 'compat-picker.js')}`)
   const { createFilesBackend } = await import(backendUrl.href)
   const { deriveDeviceLabel } = await import(deviceUrl.href)
   const {
@@ -177,6 +184,18 @@ await new Promise((resolve) => {
     looksBinary,
     previewKindFor,
   } = await import(previewUrl.href)
+  const { classifyCompatChange, resolveCompatInput } = await import(pickerUrl.href)
+
+  // 选择器纯决策：双入口形态解析（失效前科/能力缺失时目录入口自动退多选）
+  check('compat picker shape', resolveCompatInput('directory', { dirSupported: true, dirBroken: false }).directory === true
+    && resolveCompatInput('directory', { dirSupported: true, dirBroken: true }).directory === false
+    && resolveCompatInput('directory', { dirSupported: false, dirBroken: false }).directory === false
+    && resolveCompatInput('files', { dirSupported: true, dirBroken: false }).directory === false)
+  // change 分类：0 文件分支绝不静默（目录形态 = dir-empty 前科信号）
+  check('compat change classification', classifyCompatChange(3, true).kind === 'selected'
+    && classifyCompatChange(2, false).kind === 'selected'
+    && classifyCompatChange(0, true).kind === 'dir-empty'
+    && classifyCompatChange(0, false).kind === 'files-empty')
 
   const mkFile = (content, relPath) => {
     const name = relPath.split('/').at(-1)

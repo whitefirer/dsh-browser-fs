@@ -113,7 +113,14 @@ File System Access API 是安全上下文门控 API：只在 HTTPS 或 localhost
 | | 完整模式 | 兼容模式 |
 | --- | --- | --- |
 | 触发 | 安全上下文（HTTPS/localhost） | 非安全上下文自动降级 |
-| 选择方式 | 系统目录选择器（showDirectoryPicker） | input[webkitdirectory]，不支持退 multiple 多选文件 |
+| 选择方式 | 系统目录选择器（showDirectoryPicker） | 双入口：input[webkitdirectory] 选目录 / multiple 选多个文件 |
+
+**移动端行为**：兼容模式授权区是并排双入口——「选择目录」与「选多个文件」，
+不再只靠属性探测自动二选一；选择器 input 用离屏定位（非 display:none，
+移动端浏览器/微信 WebView 会拦隐藏 input 的编程式 click）。iOS 上目录选择
+可能形同虚设（webkitdirectory 属性在、选完返回 0 个文件）：此时卡片显示明确
+错误「没读到文件……请改用「选多个文件」」，且此后目录入口自动改走多选，绝不
+静默无反馈。授权成功后状态行显示所选内容（目录名或「N 个文件」）。
 | list / read | ✓ | ✓（File 内存映射，read 按 slice 截断不整读） |
 | write / 变更 | ✓ | ✗ 明确报错「兼容模式只读…」 |
 | 授权持久化 | ✓ IndexedDB，刷新自动恢复 | ✗ 无句柄可存，刷新后需重选（状态行有提示） |

@@ -6,8 +6,9 @@
  * 两档能力（特性检测 `typeof window.showDirectoryPicker === 'function'`，
  * 不看 isSecureContext —— 代理可能改过它）：
  *  - 完整模式：File System Access 句柄，IndexedDB 持久化（store.ts），可读写；
- *  - 兼容模式（非安全上下文，如局域网 http 手机访问）：input[webkitdirectory]
- *    选目录建 File 内存映射（files-backend.ts），只读、无持久化，刷新需重选。
+ *  - 兼容模式（非安全上下文，如局域网 http 手机访问）：离屏 input 双入口
+ *    选目录（webkitdirectory）/多选文件建 File 内存映射（files-backend.ts），
+ *    只读、无持久化，刷新需重选。
  *
  * 产物契约：esbuild 打成 CJS 闭包，首尾包装 window.__ModuleLoader__.load
  * （见 build.mjs）；external 仅 react / react/jsx-runtime（模块表回答）。
@@ -15,6 +16,7 @@
  */
 
 import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame, type RosterExecutor } from '../wire.js'
+import { classifyCompatChange, resolveCompatInput, type CompatPickMode } from './compat-picker.js'
 import { deriveDeviceLabel } from './device.js'
 import { executeOp, handleBackend, type FsBackend } from './fs.js'
 import { createFilesBackend } from './files-backend.js'
@@ -227,29 +229,57 @@ export function apply(ctx: ClientCtx): void {
   }
 
   /**
-   * 兼容模式的目录/文件选择器：一个隐藏的 input[type=file]（webkitdirectory
-   * 优先，不支持退 multiple）。change 后建 File 映射后端。
+   * 兼容模式的目录/文件选择器：一个离屏的 input[type=file]——离屏而非
+   * display:none（移动端浏览器/微信 WebView 拦隐藏 input 的编程式 click）。
+   * 两个入口由 UI 双按钮驱动：选目录（webkitdirectory，能力缺失或已有失效
+   * 前科时自动退多选）与选多个文件（multiple）。change 返回 0 文件绝不静默：
+   * 卡片给可见错误，目录形态 0 文件（iOS 典型）还会标记失效前科，此后目录
+   * 入口自动改走多选。
    */
   let compatInput: HTMLInputElement | null = null
-  const openCompatPicker = (): void => {
+  /** 目录选择失效前科（上次目录形态 change 返回 0 个文件）。 */
+  let compatDirPickBroken = false
+  /** 最近一次成功选择的形态（↻ 刷新按它重开选择器）。 */
+  let compatPickMode: CompatPickMode = 'directory'
+  const openCompatPicker = (mode: CompatPickMode): void => {
     if (compatInput === null) {
       const input = document.createElement('input')
       input.type = 'file'
-      input.style.display = 'none'
-      // webkitdirectory 探测走 Record 形态（TS 的 lib.dom 认为它恒在，直接 in 会把 else 窄化成 never）。
-      const probe = input as unknown as Record<string, unknown>
-      if ('webkitdirectory' in probe) input.webkitdirectory = true
-      else input.multiple = true
+      Object.assign(input.style, {
+        position: 'fixed',
+        left: '-9999px',
+        top: '0',
+        width: '1px',
+        height: '1px',
+        opacity: '0',
+      })
       input.addEventListener('change', () => {
         const files = input.files
-        if (files !== null && files.length > 0) {
+        const outcome = classifyCompatChange(files?.length ?? 0, input.webkitdirectory)
+        if (outcome.kind === 'selected' && files !== null) {
+          compatPickMode = outcome.directory ? 'directory' : 'files'
           setCompatBackend([...files])
           sendState()
+          return
+        }
+        if (outcome.kind === 'dir-empty') {
+          compatDirPickBroken = true
+          setState({ error: '没读到文件——你的浏览器可能不支持整目录选择，请改用「选多个文件」' })
+        } else {
+          setState({ error: '没读到文件，请重试或换个浏览器' })
         }
       })
       document.body.appendChild(input)
       compatInput = input
     }
+    // webkitdirectory 探测走 Record 形态（TS 的 lib.dom 认为它恒在，直接 in 会把 else 窄化成 never）。
+    const probe = compatInput as unknown as Record<string, unknown>
+    const shape = resolveCompatInput(mode, {
+      dirSupported: 'webkitdirectory' in probe,
+      dirBroken: compatDirPickBroken,
+    })
+    compatInput.webkitdirectory = shape.directory
+    compatInput.multiple = true
     // 清空 value 允许重选同一目录（否则 change 不触发）。
     compatInput.value = ''
     compatInput.click()
@@ -259,7 +289,7 @@ export function apply(ctx: ClientCtx): void {
     authorize(): void {
       // 特性检测失败 → 自动降级：兼容模式选目录（只读）。
       if (!pickerAvailable) {
-        openCompatPicker()
+        openCompatPicker('directory')
         return
       }
       void (async () => {
@@ -292,7 +322,7 @@ export function apply(ctx: ClientCtx): void {
     },
     pickNew(): void {
       if (!pickerAvailable) {
-        openCompatPicker()
+        openCompatPicker('directory')
         return
       }
       void (async () => {
@@ -351,9 +381,17 @@ export function apply(ctx: ClientCtx): void {
       setState({ nickname, label: nickname ?? derivedLabel })
       sendState()
     },
-    /** 兼容模式：弹 input 选目录/文件（UI 的直接入口）。 */
-    pickCompat(): void {
-      openCompatPicker()
+    /** 兼容模式：选目录（webkitdirectory；有失效前科时自动退多选）。 */
+    pickCompatDir(): void {
+      openCompatPicker('directory')
+    },
+    /** 兼容模式：多选文件（multiple）。 */
+    pickCompatFiles(): void {
+      openCompatPicker('files')
+    },
+    /** 兼容模式 ↻ 刷新：按上次成功选择的形态重开选择器。 */
+    pickCompatRefresh(): void {
+      openCompatPicker(compatPickMode)
     },
   }
 

@@ -72,8 +72,12 @@ export interface CardActions {
   toggleCollapsed(): void
   /** 设置设备昵称（空串清除，回落 UA 派生）。 */
   setDeviceName(name: string): void
-  /** 兼容模式：弹 input[type=file] 选目录/文件。 */
-  pickCompat(): void
+  /** 兼容模式：选目录（webkitdirectory；有失效前科时自动退多选）。 */
+  pickCompatDir(): void
+  /** 兼容模式：多选文件（multiple）。 */
+  pickCompatFiles(): void
+  /** 兼容模式 ↻ 刷新：按上次成功选择的形态重开选择器。 */
+  pickCompatRefresh(): void
 }
 
 /** 卡片数据源：订阅 + 快照 + 动作。 */
@@ -819,14 +823,15 @@ export function createCard(source: CardSource): () => ReactElement {
             ? state.compat
               ? (
                 <>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompat() }}>重新选择</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatDir() }}>重选目录</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatFiles() }}>选文件</button>
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>清除</button>
-                  {/* 兼容模式缓存即选择时快照，刷新 = 重新选择目录。 */}
+                  {/* 兼容模式缓存即选择时快照，刷新 = 按上次形态重开选择器。 */}
                   <button
                     style={buttonStyle}
                     disabled={state.busy}
                     title="刷新目录（重新选择）"
-                    onClick={() => { actions.pickCompat() }}
+                    onClick={() => { actions.pickCompatRefresh() }}
                   >
                     ↻
                   </button>
@@ -839,18 +844,24 @@ export function createCard(source: CardSource): () => ReactElement {
                   <button style={buttonStyle} title="刷新目录" onClick={() => { treeApi.current?.refresh() }}>↻</button>
                 </>
               )
-            : (
-              <>
-                <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.authorize() }}>
-                  {state.pickerAvailable
-                    ? (state.permission === 'none' ? '授权目录' : '重新授权')
-                    : '选择目录（兼容模式）'}
-                </button>
-                {state.permission !== 'none' && (
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
-                )}
-              </>
-            )}
+            : state.pickerAvailable
+              ? (
+                <>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.authorize() }}>
+                    {state.permission === 'none' ? '授权目录' : '重新授权'}
+                  </button>
+                  {state.permission !== 'none' && (
+                    <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
+                  )}
+                </>
+              )
+              : (
+                <>
+                  {/* 兼容模式授权区双入口：目录 / 多选文件，不再只靠属性探测自动二选一。 */}
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatDir() }}>选择目录</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatFiles() }}>选多个文件</button>
+                </>
+              )}
         </div>
         {!state.pickerAvailable && (
           <div style={{ marginTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.12)', paddingTop: '6px', opacity: 0.85 }}>
