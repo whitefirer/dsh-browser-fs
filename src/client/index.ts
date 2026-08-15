@@ -1,0 +1,232 @@
+/**
+ * dsh-browser-fs client 半（浏览器）：连回 host 半的 WS 通道，接收 call 帧、
+ * 在本机授权目录上执行 File System Access 操作、回发 result 帧；同时把
+ * 授权卡片注册进 shell.overlay 层。句柄持久化在 IndexedDB（store.ts），
+ * 启动时读回并 queryPermission 检查。
+ *
+ * 产物契约：esbuild 打成 CJS 闭包，首尾包装 window.__ModuleLoader__.load
+ * （见 build.mjs）；external 仅 react / react/jsx-runtime（模块表回答）。
+ * @module dsh-browser-fs/client
+ */
+
+import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame } from '../wire.js'
+import { executeOp } from './fs.js'
+import { clearHandle, loadHandle, saveHandle } from './store.js'
+import { createCard, type BrowserFsState } from './ui.js'
+
+/** 必需服务：slot 注册表（授权卡片挂 shell.overlay）。 */
+export const inject = ['slots']
+
+/** apply 实际读到的 client ctx 面（cordis-client-runner 的 guard 代理兼容它）。 */
+interface ClientCtx {
+  effect(fn: () => void | (() => void), label?: string): void
+  slots: {
+    inject(name: string, fn: () => unknown): unknown
+    register(options: Record<string, unknown>, component: unknown): () => void
+  }
+}
+
+/**
+ * Client 插件体：状态源 + WS 生命周期 + call 执行 + 授权卡片注册。
+ * @param ctx - client 根上下文。
+ */
+export function apply(ctx: ClientCtx): void {
+  let state: BrowserFsState = {
+    wsConnected: false,
+    permission: 'none',
+    dirName: null,
+    busy: false,
+    error: null,
+  }
+  const listeners = new Set<() => void>()
+  const setState = (patch: Partial<BrowserFsState>): void => {
+    state = { ...state, ...patch }
+    for (const listener of listeners) listener()
+  }
+
+  let handle: FileSystemDirectoryHandle | null = null
+  let ws: WebSocket | null = null
+  let disposed = false
+  let retryMs = 1000
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
+  const inflight = new Map<string, AbortController>()
+
+  /** 只有「句柄在手 + readwrite 已授予」才算可执行。 */
+  const ready = (): boolean => handle !== null && state.permission === 'granted'
+
+  /** 向 host 广播当前授权状态（host 据此挑执行者）。 */
+  const sendState = (): void => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'state',
+        hasHandle: ready(),
+        dirName: ready() ? state.dirName : null,
+      }))
+    }
+  }
+
+  const reply = (frame: ResultFrame): void => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame))
+  }
+
+  const onCall = async (rpcId: string, op: 'list' | 'read' | 'write', args: Record<string, unknown>): Promise<void> => {
+    if (handle === null || !ready()) {
+      reply({ type: 'result', rpcId, ok: false, error: 'browser-fs: this tab holds no authorized directory' })
+      return
+    }
+    const abort = new AbortController()
+    inflight.set(rpcId, abort)
+    try {
+      const value = await executeOp(handle, op, args, abort.signal)
+      reply({ type: 'result', rpcId, ok: true, value })
+    } catch (error) {
+      reply({
+        type: 'result',
+        rpcId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      inflight.delete(rpcId)
+    }
+  }
+
+  const onMessage = (raw: string): void => {
+    const frame = parseHostFrame(raw)
+    if (frame === null) return
+    if (frame.type === 'cancel') {
+      inflight.get(frame.rpcId)?.abort()
+      return
+    }
+    void onCall(frame.rpcId, frame.op, frame.args)
+  }
+
+  const connect = (): void => {
+    if (disposed) return
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
+    const sock = new WebSocket(`${scheme}://${location.host}${DEFAULT_WS_PATH}`)
+    ws = sock
+    sock.onopen = () => {
+      retryMs = 1000
+      setState({ wsConnected: true })
+      sendState()
+    }
+    sock.onmessage = (event) => {
+      if (typeof event.data === 'string') onMessage(event.data)
+    }
+    sock.onclose = () => {
+      if (ws === sock) {
+        ws = null
+        setState({ wsConnected: false })
+      }
+      if (!disposed) retryTimer = setTimeout(connect, retryMs)
+      retryMs = Math.min(retryMs * 2, 10_000)
+    }
+    sock.onerror = () => { sock.close() }
+  }
+
+  /** 启动恢复：读回 IndexedDB 句柄并检查权限（不自动 requestPermission —— 需要用户手势）。 */
+  const restore = async (): Promise<void> => {
+    const stored = await loadHandle()
+    if (stored === null) {
+      setState({ permission: 'none', dirName: null })
+      return
+    }
+    handle = stored
+    const permission = await stored.queryPermission({ mode: 'readwrite' })
+    setState({ permission, dirName: stored.name })
+    sendState()
+  }
+
+  const actions = {
+    authorize(): void {
+      void (async () => {
+        if (typeof showDirectoryPicker !== 'function') {
+          setState({ error: '当前页面不是安全上下文（需 HTTPS 或 localhost），File System Access API 不可用' })
+          return
+        }
+        setState({ busy: true, error: null })
+        try {
+          if (handle === null) {
+            handle = await showDirectoryPicker({ mode: 'readwrite' })
+            await saveHandle(handle)
+            setState({ permission: 'granted', dirName: handle.name })
+          } else {
+            const permission = await handle.requestPermission({ mode: 'readwrite' })
+            setState({ permission, dirName: handle.name })
+          }
+          sendState()
+        } catch (error) {
+          // 用户关掉系统选择器/权限弹窗不是错误。
+          if (!(error instanceof DOMException && error.name === 'AbortError')) {
+            setState({ error: error instanceof Error ? error.message : String(error) })
+          }
+        } finally {
+          setState({ busy: false })
+        }
+      })()
+    },
+    pickNew(): void {
+      void (async () => {
+        if (typeof showDirectoryPicker !== 'function') {
+          setState({ error: '当前页面不是安全上下文（需 HTTPS 或 localhost），File System Access API 不可用' })
+          return
+        }
+        setState({ busy: true, error: null })
+        try {
+          handle = await showDirectoryPicker({ mode: 'readwrite' })
+          await saveHandle(handle)
+          setState({ permission: 'granted', dirName: handle.name })
+          sendState()
+        } catch (error) {
+          if (!(error instanceof DOMException && error.name === 'AbortError')) {
+            setState({ error: error instanceof Error ? error.message : String(error) })
+          }
+        } finally {
+          setState({ busy: false })
+        }
+      })()
+    },
+    revoke(): void {
+      void (async () => {
+        handle = null
+        await clearHandle()
+        setState({ permission: 'none', dirName: null, error: null })
+        sendState()
+      })()
+    },
+  }
+
+  const card = createCard({
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    getSnapshot: () => state,
+    actions,
+  })
+
+  ctx.effect(() => {
+    connect()
+    void restore()
+    return () => {
+      disposed = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
+      ws?.close()
+      for (const controller of inflight.values()) controller.abort()
+      inflight.clear()
+    }
+  }, 'browser-fs: websocket lifecycle')
+
+  ctx.effect(() => {
+    let dispose: (() => void) | undefined
+    ctx.slots.inject('shell.overlay', () => {
+      dispose = ctx.slots.register(
+        { name: 'shell.overlay', id: 'browser-fs', order: 100, label: '浏览器文件' },
+        card,
+      )
+      return dispose
+    })
+    return () => { dispose?.() }
+  }, 'browser-fs: overlay card')
+}

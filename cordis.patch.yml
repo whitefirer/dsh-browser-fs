@@ -1,0 +1,18 @@
+# dsh-browser-fs bundle patch
+#
+# 本文件是 npm 包的 `dsh.bundle.patch` 层：通过官方 CLI 安装插件时 ——
+#
+#   dsh plugin --profile <name> add file:/path/to/dsh-browser-fs
+#
+# —— 该命令会把本包装进 profile 的 dependencies，并因为 manifest 里的
+# `dsh.bundle` 声明把 `dsh-browser-fs` 追加进 `dsh.profile.bundles` 层栈。
+# profile 启动时把下面这条 patch（单个 insert 行）合并进 cordis 树，
+# 无需手工编辑 profile 的 cordis.patch.yml。
+#
+# host 半 inject: ['webServer', 'tools']。
+#   wsPath           — WS 通道的精确 pathname（client 半默认常量须保持一致）
+#   requestTimeoutMs — 浏览器端执行一次调用的超时预算
+- insert:
+    - id: browser-fs
+      name: 'dsh-browser-fs'
+      config: { wsPath: '/browser-fs/ws', requestTimeoutMs: 120000 }
