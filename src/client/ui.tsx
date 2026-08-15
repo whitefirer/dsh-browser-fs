@@ -125,6 +125,13 @@ export function createCard(source: CardSource): () => ReactElement {
         {state.error !== null && (
           <div style={{ marginTop: '6px', color: '#f28b82' }}>{state.error}</div>
         )}
+        {state.error !== null && window.self !== window.top && (
+          <div style={{ marginTop: '6px' }}>
+            <a href={location.origin} target="_blank" rel="noreferrer" style={{ color: '#8ab4f8' }}>
+              ↗ 在独立标签页打开本页完成授权
+            </a>
+          </div>
+        )}
       </div>
     )
   }

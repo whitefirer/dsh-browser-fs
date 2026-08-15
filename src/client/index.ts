@@ -138,11 +138,30 @@ export function apply(ctx: ClientCtx): void {
     sendState()
   }
 
+  /**
+   * 环境阻断检查：两种情况下授权注定失败，提前给出可操作的中文引导而非
+   * 甩浏览器原始报错。
+   * 1. 非安全上下文（http://局域网IP）：showDirectoryPicker 直接不存在；
+   * 2. 跨源 iframe（如 cenacle 网页浏览窗口）：浏览器禁止子框架弹文件
+   *    选择器。授权在独立标签页完成一次即可——句柄按源持久化在
+   *    IndexedDB，此后 iframe 内无需再弹。
+   */
+  const envBlocker = (): string | null => {
+    if (typeof showDirectoryPicker !== 'function') {
+      return '当前页面不是安全上下文（需 HTTPS 或 localhost），File System Access API 不可用'
+    }
+    if (window.self !== window.top) {
+      return '嵌入窗口里无法弹出目录选择器：请点下方链接在独立标签页打开本页完成授权（一次即可，此后嵌入窗口内自动可用）'
+    }
+    return null
+  }
+
   const actions = {
     authorize(): void {
       void (async () => {
-        if (typeof showDirectoryPicker !== 'function') {
-          setState({ error: '当前页面不是安全上下文（需 HTTPS 或 localhost），File System Access API 不可用' })
+        const blocker = envBlocker()
+        if (blocker !== null) {
+          setState({ error: blocker })
           return
         }
         setState({ busy: true, error: null })
@@ -168,8 +187,9 @@ export function apply(ctx: ClientCtx): void {
     },
     pickNew(): void {
       void (async () => {
-        if (typeof showDirectoryPicker !== 'function') {
-          setState({ error: '当前页面不是安全上下文（需 HTTPS 或 localhost），File System Access API 不可用' })
+        const blocker = envBlocker()
+        if (blocker !== null) {
+          setState({ error: blocker })
           return
         }
         setState({ busy: true, error: null })
