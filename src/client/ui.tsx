@@ -676,7 +676,7 @@ export function createCard(source: CardSource): () => ReactElement {
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
-    // 标题行拖拽把手：pointer events 一统鼠标/触摸；capture 保证移出把手仍跟随。
+    // 标题行拖拽把手：pointer events 一统鼠标/触摸。
     const onHandlePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
       if (event.pointerType === 'mouse' && event.button !== 0) return
       const card = cardRef.current
@@ -690,7 +690,8 @@ export function createCard(source: CardSource): () => ReactElement {
         baseTop: rect.top,
         moved: false,
       }
-      event.currentTarget.setPointerCapture(event.pointerId)
+      // 注意：这里不能 setPointerCapture——捕获会把后续 click 重定向到把手行，
+      // 里面的「—」收起按钮就永远点不中。等真正越过拖拽阈值再捕获。
     }
 
     const onHandlePointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -702,6 +703,8 @@ export function createCard(source: CardSource): () => ReactElement {
         // 阈值内不动卡片：保住把手上按钮/圆点的点击语义。
         if (Math.abs(dx) <= DRAG_THRESHOLD_PX && Math.abs(dy) <= DRAG_THRESHOLD_PX) return
         drag.moved = true
+        // 越过阈值才算开拖：此刻捕获，保证移出把手仍跟随。
+        event.currentTarget.setPointerCapture(event.pointerId)
       }
       setPos({ left: drag.baseLeft + dx, top: drag.baseTop + dy })
     }
