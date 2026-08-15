@@ -70,6 +70,7 @@ export function apply(ctx: ClientCtx): void {
    * showDirectoryPicker 不存在即落入兼容模式（只读 File 映射）。
    */
   const pickerAvailable = typeof window.showDirectoryPicker === 'function'
+  console.log('[browser-fs] init: showDirectoryPicker', pickerAvailable ? '可用（完整模式）' : '不可用（兼容模式）', '| UA:', navigator.userAgent)
 
   let state: BrowserFsState = {
     wsConnected: false,
@@ -242,6 +243,7 @@ export function apply(ctx: ClientCtx): void {
   /** 最近一次成功选择的形态（↻ 刷新按它重开选择器）。 */
   let compatPickMode: CompatPickMode = 'directory'
   const openCompatPicker = (mode: CompatPickMode): void => {
+    console.log('[browser-fs] openCompatPicker, mode =', mode)
     if (compatInput === null) {
       const input = document.createElement('input')
       input.type = 'file'
@@ -255,6 +257,7 @@ export function apply(ctx: ClientCtx): void {
       })
       input.addEventListener('change', () => {
         const files = input.files
+        console.log('[browser-fs] change: files =', files?.length ?? 0, ', webkitdirectory =', input.webkitdirectory)
         const outcome = classifyCompatChange(files?.length ?? 0, input.webkitdirectory)
         if (outcome.kind === 'selected' && files !== null) {
           compatPickMode = outcome.directory ? 'directory' : 'files'
@@ -282,6 +285,7 @@ export function apply(ctx: ClientCtx): void {
     compatInput.multiple = true
     // 清空 value 允许重选同一目录（否则 change 不触发）。
     compatInput.value = ''
+    console.log('[browser-fs] input.click() 触发选择器, directory =', shape.directory)
     compatInput.click()
   }
 
