@@ -7,6 +7,8 @@
 目录，句柄存 IndexedDB；agent 通过三个模型工具 list/read/write 该目录下的文件，工具
 调用经插件自建的 WebSocket 通道转发到浏览器执行。
 
+![agent 调 browser_fs_read 读到授权目录里的 hello.txt；右下角为插件卡片](docs/screenshot-in-action.png)
+
 ## 原理
 
 双面插件（cordis 插件体系）：
