@@ -4,16 +4,17 @@
  * 拖拽把手自由定位，位置存 localStorage 并在拖动结束/窗口 resize 时
  * clamp 进视口）。
  *
- * 两种形态：
+ * 两种形态（共用同一 pos——卡片拖到哪儿，收起后球就在哪儿，展开也回原位）：
  *  - 展开：状态点 + 目录名 + 授权按钮组 + 「目录内容」懒加载树 + 「—」收起钮；
- *  - 收起：右下角 36px 圆钮（📁 + 状态点），点击展开。折叠状态由 apply 闭包
- *    持久化到 localStorage（本文件只读快照）。
+ *  - 收起：36px 圆钮（📁 + 状态点），点一下展开；圆球同样按住可拖（与卡片
+ *    把手同一套 4px 阈值/越过阈值才捕获的逻辑，不移动就松手才当点击）。
+ *    折叠状态由 apply 闭包持久化到 localStorage（本文件只读快照）。
  *
  * 目录树状态（展开集合/已加载层级）是组件内的 useState —— 纯 viewing state，
  * 不进共享快照；rootVersion 作 key，换目录/解除授权时整树重置。文件名可点击
- * 弹出预览层（FilePreview：图片走 blob URL，文本取前 64KB，已映射语言经
- * 懒加载高亮 chunk 做语法着色）；授权行的「↻」刷新按钮经 apiRef 调 DirTree
- * 的清缓存重拉（兼容模式改为重开选择器）。
+ * 弹出预览窗（FilePreview：固定尺寸窗口 + 钉顶标题栏；图片走 blob URL，文本
+ * 取前 64KB，已映射语言经懒加载高亮 chunk 做语法着色）；授权行的「↻」
+ * 刷新按钮经 apiRef 调 DirTree 的清缓存重拉（兼容模式改为重开选择器）。
  * @module dsh-browser-fs/client/ui
  */
 
@@ -242,10 +243,13 @@ const previewMaskStyle: CSSProperties = {
 }
 
 const previewCardStyle: CSSProperties = {
-  maxWidth: 'min(720px, 90vw)',
-  maxHeight: '80vh',
-  overflow: 'auto',
-  padding: '10px 12px',
+  // 窗口形态：固定尺寸不随内容伸缩；flex 列布局，标题栏钉顶、内容区独立滚动。
+  width: 'min(720px, 92vw)',
+  height: 'min(70vh, 560px)',
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden',
+  padding: 0,
   borderRadius: '10px',
   background: 'rgba(32, 33, 36, 0.98)',
   color: '#e8eaed',
@@ -256,11 +260,13 @@ const previewCardStyle: CSSProperties = {
 }
 
 /**
- * 文件预览层：遮罩 + 卡片。图片（按扩展名）读 arrayBuffer 建 blob URL 用
- * <img> 展示（>8MB 不拉取，直接提示太大）；其余按文本只取前 64KB UTF-8
- * 解码，等宽 <pre> 展示并标注截断；解码后含 NUL 视为二进制。文本经
- * langFor 映射到语言时再做语法着色（高亮 chunk 按需加载，loading 态先出
- * 纯文本，失败退回纯文本）。
+ * 文件预览层：遮罩 + 固定尺寸窗口（min(720px,92vw) × min(70vh,560px)，不随
+ * 内容伸缩）。标题栏钉顶不滚动：文件名（左，过长截断）+ 大小/截断标注（中）
+ * + ✕（右）；其下是相对路径行；内容区独立滚动。图片（按扩展名）读
+ * arrayBuffer 建 blob URL 用 <img> 展示（>8MB 不拉取，直接提示太大）；其余
+ * 按文本只取前 64KB UTF-8 解码，等宽 <pre> 展示；解码后含 NUL 视为二进制。
+ * 文本经 langFor 映射到语言时再做语法着色（高亮 chunk 按需加载，loading 态
+ * 先出纯文本，失败退回纯文本）。
  * ✕ / 点遮罩 / ESC 关闭，关闭（卸载）时 revokeObjectURL。
  * @param props.backend - 当前文件后端（两模式同路径，readBlob 各自实现）。
  * @param props.path - 相对授权根的文件路径。
@@ -328,23 +334,45 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
     return () => { window.removeEventListener('keydown', onKey) }
   }, [onClose])
 
+  /** 标题栏中部标注：大小 + 截断（加载中/错误无标注）。 */
+  const meta = ((): string => {
+    switch (result.status) {
+      case 'image':
+      case 'too-big': return `图片 · ${humanSize(result.size)}`
+      case 'text':
+      case 'code': return `${humanSize(result.size)}${result.truncated ? ' · 仅前 64KB' : ''}`
+      case 'binary': return humanSize(result.size)
+      default: return ''
+    }
+  })()
+
   return (
     <div style={previewMaskStyle} onClick={onClose}>
       <div style={previewCardStyle} onClick={(event) => { event.stopPropagation() }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <strong style={{ ...rowTextStyle, flex: 1 }} title={path}>📄 {name}</strong>
-          <button
-            style={{ ...buttonStyle, padding: '0 7px', lineHeight: 1.2 }}
-            onClick={onClose}
-            title="关闭（Esc）"
-          >
-            ✕
-          </button>
+        {/* 固定标题栏：文件名（左，过长截断）+ 大小/截断标注（中）+ ✕（右钉住），不随内容滚动。 */}
+        <div style={{
+          flexShrink: 0, padding: '8px 12px',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.12)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <strong style={{ ...rowTextStyle, flex: 1, minWidth: 0 }} title={path}>📄 {name}</strong>
+            {meta !== '' && (
+              <span style={{ opacity: 0.6, fontSize: '11px', whiteSpace: 'nowrap', flexShrink: 0 }}>{meta}</span>
+            )}
+            <button
+              style={{ ...buttonStyle, padding: '0 7px', lineHeight: 1.2, flexShrink: 0 }}
+              onClick={onClose}
+              title="关闭（Esc）"
+            >
+              ✕
+            </button>
+          </div>
+          <div style={{ ...rowTextStyle, opacity: 0.6, fontFamily: 'monospace', fontSize: '11px' }} title={path}>
+            {path}
+          </div>
         </div>
-        <div style={{ ...rowTextStyle, opacity: 0.6, fontFamily: 'monospace', fontSize: '11px' }} title={path}>
-          {path}
-        </div>
-        <div style={{ marginTop: '8px' }}>
+        {/* 内容区独立滚动（minHeight:0 让 flex 子项可收缩出滚动条）。 */}
+        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px' }}>
           {result.status === 'loading' && <span style={{ opacity: 0.6 }}>加载中…</span>}
           {result.status === 'error' && <span style={{ color: '#f28b82' }}>{result.message}</span>}
           {result.status === 'too-big' && (
@@ -358,11 +386,6 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
           )}
           {result.status === 'text' && (
             <>
-              {result.truncated && (
-                <div style={{ opacity: 0.6, marginBottom: '4px' }}>
-                  仅前 64KB（文件共 {humanSize(result.size)}）
-                </div>
-              )}
               {result.highlighting === true && (
                 <div style={{ opacity: 0.6, marginBottom: '4px' }}>语法着色加载中…</div>
               )}
@@ -375,23 +398,16 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
             </>
           )}
           {result.status === 'code' && (
-            <>
-              {result.truncated && (
-                <div style={{ opacity: 0.6, marginBottom: '4px' }}>
-                  仅前 64KB（文件共 {humanSize(result.size)}）
-                </div>
-              )}
-              {/* hljs 输出已转义（& < >），可安全注入。 */}
-              <pre
-                className="hljs"
-                style={{
-                  margin: 0, fontFamily: 'monospace', fontSize: '11px',
-                  whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                }}
-              >
-                <code dangerouslySetInnerHTML={{ __html: result.html }} />
-              </pre>
-            </>
+            // hljs 输出已转义（& < >），可安全注入。
+            <pre
+              className="hljs"
+              style={{
+                margin: 0, fontFamily: 'monospace', fontSize: '11px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+              }}
+            >
+              <code dangerouslySetInnerHTML={{ __html: result.html }} />
+            </pre>
           )}
         </div>
       </div>
@@ -645,9 +661,10 @@ export function createCard(source: CardSource): () => ReactElement {
     const { actions } = source
     const [editingName, setEditingName] = useState(false)
     const [draftName, setDraftName] = useState('')
-    /** 自由定位（null = 默认右下角）；初值取本地记忆。 */
+    /** 自由定位（null = 默认右下角）；初值取本地记忆。卡片与圆球共用同一 pos——两形态同一位置。 */
     const [pos, setPos] = useState<CardPos | null>(readStoredCardPos)
     const cardRef = useRef<HTMLDivElement | null>(null)
+    const fabRef = useRef<HTMLButtonElement | null>(null)
     const dragRef = useRef<{
       pointerId: number
       startX: number
@@ -656,13 +673,13 @@ export function createCard(source: CardSource): () => ReactElement {
       baseTop: number
       moved: boolean
     } | null>(null)
-    /** 真拖拽后要吞掉紧随的 click（如按在「—」上起拖，松手不该触发折叠）。 */
+    /** 真拖拽后要吞掉紧随的 click（如按在「—」上起拖/拖完圆球，松手不该触发折叠/展开）。 */
     const suppressClickRef = useRef(false)
 
-    /** 按卡片当前实际尺寸 clamp（ref 未挂载时按零尺寸兜底）。 */
+    /** 按当前挂载形态（卡片或圆球）的实际尺寸 clamp（都未挂载时按零尺寸兜底）。 */
     const clampToViewport = (p: CardPos): CardPos => {
-      const card = cardRef.current
-      return clampCardPos(p, { width: card?.offsetWidth ?? 0, height: card?.offsetHeight ?? 0 })
+      const el = cardRef.current ?? fabRef.current
+      return clampCardPos(p, { width: el?.offsetWidth ?? 0, height: el?.offsetHeight ?? 0 })
     }
 
     // 恢复的位置可能已出视口（窗口此后变小过）：挂载后 clamp 一次；窗口
@@ -676,12 +693,12 @@ export function createCard(source: CardSource): () => ReactElement {
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
-    // 标题行拖拽把手：pointer events 一统鼠标/触摸。
-    const onHandlePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
+    // 拖拽把手（卡片标题行 / 圆球共用同一套）：pointer events 一统鼠标/触摸。
+    const onHandlePointerDown = (event: React.PointerEvent<HTMLElement>): void => {
       if (event.pointerType === 'mouse' && event.button !== 0) return
-      const card = cardRef.current
-      if (card === null) return
-      const rect = card.getBoundingClientRect()
+      const el = cardRef.current ?? fabRef.current
+      if (el === null) return
+      const rect = el.getBoundingClientRect()
       dragRef.current = {
         pointerId: event.pointerId,
         startX: event.clientX,
@@ -690,17 +707,17 @@ export function createCard(source: CardSource): () => ReactElement {
         baseTop: rect.top,
         moved: false,
       }
-      // 注意：这里不能 setPointerCapture——捕获会把后续 click 重定向到把手行，
-      // 里面的「—」收起按钮就永远点不中。等真正越过拖拽阈值再捕获。
+      // 注意：这里不能 setPointerCapture——捕获会把后续 click 重定向到把手，
+      // 上面的「—」收起/圆球展开就永远点不中。等真正越过拖拽阈值再捕获。
     }
 
-    const onHandlePointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const onHandlePointerMove = (event: React.PointerEvent<HTMLElement>): void => {
       const drag = dragRef.current
       if (drag === null || event.pointerId !== drag.pointerId) return
       const dx = event.clientX - drag.startX
       const dy = event.clientY - drag.startY
       if (!drag.moved) {
-        // 阈值内不动卡片：保住把手上按钮/圆点的点击语义。
+        // 阈值内不动位置：保住把手上的点击语义。
         if (Math.abs(dx) <= DRAG_THRESHOLD_PX && Math.abs(dy) <= DRAG_THRESHOLD_PX) return
         drag.moved = true
         // 越过阈值才算开拖：此刻捕获，保证移出把手仍跟随。
@@ -709,7 +726,7 @@ export function createCard(source: CardSource): () => ReactElement {
       setPos({ left: drag.baseLeft + dx, top: drag.baseTop + dy })
     }
 
-    const endDrag = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const endDrag = (event: React.PointerEvent<HTMLElement>): void => {
       const drag = dragRef.current
       if (drag === null || event.pointerId !== drag.pointerId) return
       dragRef.current = null
@@ -726,9 +743,33 @@ export function createCard(source: CardSource): () => ReactElement {
       })
     }
 
+    /** 真拖拽后的 click 一律吞掉（卡片根/圆球的 onClickCapture 共用）。 */
+    const swallowClickAfterDrag = (event: React.SyntheticEvent): void => {
+      if (suppressClickRef.current) {
+        suppressClickRef.current = false
+        event.stopPropagation()
+        event.preventDefault()
+      }
+    }
+
     if (state.collapsed) {
+      // 圆球与卡片共用 pos：卡片拖到哪儿，收起后球就在哪儿，展开也回原位。
+      // 球同样可拖（同一套阈值/捕获逻辑）；没移动过的松手才展开。
+      const appliedFabStyle: CSSProperties = pos === null
+        ? fabStyle
+        : { ...fabStyle, right: 'auto', bottom: 'auto', left: `${String(pos.left)}px`, top: `${String(pos.top)}px` }
       return (
-        <button style={fabStyle} onClick={() => { actions.toggleCollapsed() }} title="browser-fs 浏览器文件">
+        <button
+          ref={fabRef}
+          style={{ ...appliedFabStyle, touchAction: 'none', userSelect: 'none' }}
+          title="点击展开 · 按住可拖动"
+          onClickCapture={swallowClickAfterDrag}
+          onClick={() => { actions.toggleCollapsed() }}
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
           📁
           <StatusDot color={statusColor(state)} />
         </button>
@@ -749,14 +790,7 @@ export function createCard(source: CardSource): () => ReactElement {
       <div
         ref={cardRef}
         style={appliedCardStyle}
-        onClickCapture={(event) => {
-          // 真拖拽后的 click 一律吞掉（防止拖到按钮上松手触发按钮动作）。
-          if (suppressClickRef.current) {
-            suppressClickRef.current = false
-            event.stopPropagation()
-            event.preventDefault()
-          }
-        }}
+        onClickCapture={swallowClickAfterDrag}
       >
         <div
           style={{
