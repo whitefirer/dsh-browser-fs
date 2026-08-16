@@ -18,6 +18,7 @@
 import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame, type RosterExecutor } from '../wire.js'
 import { classifyCompatChange, resolveCompatInput, type CompatPickMode } from './compat-picker.js'
 import { deriveDeviceLabel } from './device.js'
+import { STRINGS, detectLang, subscribeLang } from './i18n.js'
 import { executeOp, handleBackend, type FsBackend } from './fs.js'
 import { createFilesBackend } from './files-backend.js'
 import { clearHandle, loadHandle, saveHandle } from './store.js'
@@ -86,6 +87,7 @@ export function apply(ctx: ClientCtx): void {
     executors: [],
     pickerAvailable,
     compat: false,
+    lang: detectLang(),
   }
   const listeners = new Set<() => void>()
   const setState = (patch: Partial<BrowserFsState>): void => {
@@ -224,7 +226,7 @@ export function apply(ctx: ClientCtx): void {
    */
   const envBlocker = (): string | null => {
     if (window.self !== window.top) {
-      return '嵌入窗口里无法弹出目录选择器：请点下方链接在独立标签页打开本页完成授权（一次即可，此后嵌入窗口内自动可用）'
+      return STRINGS[state.lang].errIframeBlocker
     }
     return null
   }
@@ -267,9 +269,9 @@ export function apply(ctx: ClientCtx): void {
         }
         if (outcome.kind === 'dir-empty') {
           compatDirPickBroken = true
-          setState({ error: '没读到文件——你的浏览器可能不支持整目录选择，请改用「选多个文件」' })
+          setState({ error: STRINGS[state.lang].errDirEmpty })
         } else {
-          setState({ error: '没读到文件，请重试或换个浏览器' })
+          setState({ error: STRINGS[state.lang].errFilesEmpty })
         }
       })
       document.body.appendChild(input)
@@ -417,6 +419,12 @@ export function apply(ctx: ClientCtx): void {
       compatInput = null
     }
   }, 'browser-fs: websocket lifecycle')
+
+  // 语言跟随：dsh 的 UI 语言体现在 <html lang>，MutationObserver 订阅其变化。
+  ctx.effect(
+    () => subscribeLang(() => { setState({ lang: detectLang() }) }),
+    'browser-fs: lang follow',
+  )
 
   ctx.effect(() => {
     let dispose: (() => void) | undefined

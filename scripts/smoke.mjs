@@ -163,6 +163,7 @@ await new Promise((resolve) => {
       'src/client/preview.ts',
       'src/client/compat-picker.ts',
       'src/client/panel-fit.ts',
+      'src/client/i18n.ts',
     ],
     outdir: join(out, '..', 'compat-out'),
     bundle: true,
@@ -188,6 +189,19 @@ await new Promise((resolve) => {
   } = await import(previewUrl.href)
   const { classifyCompatChange, resolveCompatInput } = await import(pickerUrl.href)
   const { fitPanelToViewport } = await import(panelFitUrl.href)
+  const i18nUrl = new URL(`file://${join(out, '..', 'compat-out', 'i18n.js')}`)
+  const { STRINGS, langFromTag } = await import(i18nUrl.href)
+
+  // i18n：中英字典 key 严格对齐（防漏译）；语言标签映射（zh 系归中、其余归英）
+  check('i18n key parity', JSON.stringify(Object.keys(STRINGS.zh).sort())
+    === JSON.stringify(Object.keys(STRINGS.en).sort()))
+  check('i18n langFromTag', langFromTag('zh-CN') === 'zh' && langFromTag('zh') === 'zh'
+    && langFromTag('en-US') === 'en' && langFromTag('en') === 'en'
+    && langFromTag('') === 'en' && langFromTag('fr-FR') === 'en')
+  // 插值函数抽查（两语言都产出含数据的字符串）
+  check('i18n interpolation', STRINGS.zh.moreItems(5).includes('5')
+    && STRINGS.en.moreItems(5).includes('5')
+    && STRINGS.en.statusGranted('Docs', 'Linux · Chrome').includes('Docs'))
 
   // 展开面板视口钳位：右/下边缘翻转展开方向，翻转不够再 clamp 进 10px 边距
   {

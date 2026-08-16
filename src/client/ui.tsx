@@ -29,6 +29,7 @@ import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactElement } from 'react'
 import { DEFAULT_HIGHLIGHT_PATH, type RosterExecutor } from '../wire.js'
 import type { FsBackend } from './fs.js'
+import { STRINGS, type Lang, type Strings } from './i18n.js'
 import { FAB_SIZE, fitPanelToViewport } from './panel-fit.js'
 import {
   MAX_IMAGE_PREVIEW_BYTES,
@@ -67,6 +68,8 @@ export interface BrowserFsState {
   pickerAvailable: boolean
   /** 当前是否处于兼容模式（File 映射、只读、无持久化）。 */
   compat: boolean
+  /** 当前 UI 语言（跟随 dsh 页面的 <html lang>）。 */
+  lang: Lang
 }
 
 /** 卡片动作（授权必须经过用户手势，全部挂按钮点击）。 */
@@ -152,23 +155,23 @@ function statusColor(state: BrowserFsState): string {
   return '#fbbc04'
 }
 
-function statusText(state: BrowserFsState): string {
-  if (!state.wsConnected) return '未连接宿主（重连中）'
+function statusText(state: BrowserFsState, s: Strings): string {
+  if (!state.wsConnected) return s.statusNoHost
   switch (state.permission) {
     case 'granted': return state.compat
-      ? `已选择：${state.dirName ?? ''}（本机：${state.label}；兼容模式只读，刷新后需重选）`
-      : `已授权：${state.dirName ?? ''}（本机：${state.label}）`
-    case 'prompt': return '目录权限待确认'
-    case 'denied': return '目录权限被拒绝'
+      ? s.statusGrantedCompat(state.dirName ?? '', state.label)
+      : s.statusGranted(state.dirName ?? '', state.label)
+    case 'prompt': return s.statusPrompt
+    case 'denied': return s.statusDenied
     case 'none': {
       // 本机没授权但 roster 里有持柄设备：告诉用户授权落在哪台设备上。
       if (state.executors.length > 0) {
         const whom = state.executors
           .map(executor => `${executor.label}${executor.dirName === null ? '' : `（${executor.dirName}）`}`)
           .join('、')
-        return `当前授权在设备：${whom}`
+        return s.statusGrantElsewhere(whom)
       }
-      return '未授权目录'
+      return s.statusNone
     }
   }
 }
@@ -284,7 +287,7 @@ const previewCardStyle: CSSProperties = {
  * @param props.path - 相对授权根的文件路径。
  * @param props.onClose - 关闭回调。
  */
-function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: string; onClose(): void }): ReactElement {
+function FilePreview({ backend, path, onClose, s }: { backend: FsBackend; path: string; onClose(): void; s: Strings }): ReactElement {
   const [result, setResult] = useState<PreviewResult>({ status: 'loading' })
   const name = path.split('/').pop() ?? path
 
@@ -350,9 +353,9 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
   const meta = ((): string => {
     switch (result.status) {
       case 'image':
-      case 'too-big': return `图片 · ${humanSize(result.size)}`
+      case 'too-big': return s.metaImage(humanSize(result.size))
       case 'text':
-      case 'code': return `${humanSize(result.size)}${result.truncated ? ' · 仅前 64KB' : ''}`
+      case 'code': return `${humanSize(result.size)}${result.truncated ? ` · ${s.metaTruncated}` : ''}`
       case 'binary': return humanSize(result.size)
       default: return ''
     }
@@ -375,7 +378,7 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
             <button
               style={{ ...buttonStyle, padding: '0 7px', lineHeight: 1.2, flexShrink: 0 }}
               onClick={onClose}
-              title="关闭（Esc）"
+              title={s.closeTip}
             >
               ✕
             </button>
@@ -386,13 +389,13 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
         </div>
         {/* 内容区独立滚动（minHeight:0 让 flex 子项可收缩出滚动条）。 */}
         <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '10px 12px' }}>
-          {result.status === 'loading' && <span style={{ opacity: 0.6 }}>加载中…</span>}
+          {result.status === 'loading' && <span style={{ opacity: 0.6 }}>{s.loading}</span>}
           {result.status === 'error' && <span style={{ color: '#f28b82' }}>{result.message}</span>}
           {result.status === 'too-big' && (
-            <span style={{ opacity: 0.85 }}>图片太大（{humanSize(result.size)}），超过 8MB 不预览</span>
+            <span style={{ opacity: 0.85 }}>{s.tooBig(humanSize(result.size))}</span>
           )}
           {result.status === 'binary' && (
-            <span style={{ opacity: 0.85 }}>二进制文件不支持预览（{humanSize(result.size)}）</span>
+            <span style={{ opacity: 0.85 }}>{s.binary(humanSize(result.size))}</span>
           )}
           {result.status === 'image' && (
             <img src={result.url} alt={name} style={{ maxWidth: '100%', borderRadius: '6px' }} />
@@ -400,7 +403,7 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
           {result.status === 'text' && (
             <>
               {result.highlighting === true && (
-                <div style={{ opacity: 0.6, marginBottom: '4px' }}>语法着色加载中…</div>
+                <div style={{ opacity: 0.6, marginBottom: '4px' }}>{s.hlLoading}</div>
               )}
               <pre style={{
                 margin: 0, fontFamily: 'monospace', fontSize: '11px',
@@ -443,7 +446,7 @@ export interface DirTreeApi {
  * @param props.backend - 当前文件后端。
  * @param props.apiRef - 输出 DirTreeApi 的引用（createCard 闭包持有）。
  */
-function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: DirTreeApi | null } }): ReactElement {
+function DirTree({ backend, apiRef, s }: { backend: FsBackend; apiRef: { current: DirTreeApi | null }; s: Strings }): ReactElement {
   const [open, setOpen] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [levels, setLevels] = useState<ReadonlyMap<string, LevelData>>(new Map())
@@ -550,7 +553,7 @@ function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: D
               <>
                 <span
                   style={{ ...rowTextStyle, flex: 1, cursor: 'pointer', color: '#8ab4f8' }}
-                  title={`点击预览：${entry.path}`}
+                  title={s.previewTip(entry.path)}
                   onClick={() => { setPreview(entry.path) }}
                 >
                   📄 {entry.name}
@@ -558,10 +561,10 @@ function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: D
                 </span>
                 <button
                   style={{ ...buttonStyle, padding: '0 5px', fontSize: '10px', flexShrink: 0 }}
-                  title={`复制相对路径：${entry.path}`}
+                  title={s.copyPathTip(entry.path)}
                   onClick={() => { copyPath(entry.path) }}
                 >
-                  {copied === entry.path ? '✓' : '复制路径'}
+                  {copied === entry.path ? '✓' : s.copyPath}
                 </button>
               </>
             )}
@@ -571,7 +574,7 @@ function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: D
         if (loading.has(entry.path) && !levels.has(entry.path)) {
           rows.push(
             <div key={`${entry.path}~loading`} style={{ paddingLeft: `${String((depth + 1) * 12)}px`, opacity: 0.6 }}>
-              加载中…
+              {s.loading}
             </div>,
           )
         }
@@ -590,7 +593,7 @@ function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: D
     if (rest > 0) {
       rows.push(
         <div key={`${dirPath}~more`} style={{ paddingLeft: `${String(depth * 12)}px`, opacity: 0.6 }}>
-          …还有 {rest} 项
+          {s.moreItems(rest)}
         </div>,
       )
     }
@@ -600,17 +603,17 @@ function DirTree({ backend, apiRef }: { backend: FsBackend; apiRef: { current: D
   return (
     <div style={{ marginTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.12)', paddingTop: '6px' }}>
       <div style={{ cursor: 'pointer', userSelect: 'none' }} onClick={toggleSection}>
-        {open ? '▾' : '▸'} 目录内容
+        {open ? '▾' : '▸'} {s.treeSection}
       </div>
       {open && (
         <div style={{ maxHeight: '240px', overflowY: 'auto', marginTop: '4px' }}>
-          {loading.has('') && !levels.has('') && <div style={{ opacity: 0.6 }}>加载中…</div>}
+          {loading.has('') && !levels.has('') && <div style={{ opacity: 0.6 }}>{s.loading}</div>}
           {errors.has('') && <div style={{ color: '#f28b82' }}>{errors.get('')}</div>}
           {renderLevel('', 0)}
         </div>
       )}
       {preview !== null && (
-        <FilePreview backend={backend} path={preview} onClose={() => { setPreview(null) }} />
+        <FilePreview backend={backend} path={preview} onClose={() => { setPreview(null) }} s={s} />
       )}
     </div>
   )
@@ -626,9 +629,6 @@ interface CardPos {
 
 /** 卡片位置的 localStorage key（与 device-name/collapsed 同前缀约定）。 */
 const CARD_POS_KEY = 'dsh-browser-fs:card-pos'
-
-/** 拖动结束/窗口 resize 后视口内至少保留可见的像素数。 */
-const CARD_MIN_VISIBLE = 48
 
 /** 位移超过该像素才算拖拽；低于此按点击处理（不吃折叠/昵称/授权按钮的点击）。 */
 const DRAG_THRESHOLD_PX = 4
@@ -650,15 +650,14 @@ function readStoredCardPos(): CardPos | null {
 }
 
 /**
- * 把卡片位置 clamp 进视口：左右方向至少露 48px，上方不许出屏（标题行是
- * 唯一把手，必须够得着），下方最多沉到只露 48px。
- * @param pos - 待校正位置。
- * @param size - 卡片当前实际尺寸。
+ * 球位锚点 clamp：整个球（FAB_SIZE 见方）始终完整留在视口内，贴边允许、
+ * 不留隐性边距。pos 语义即球的左上角（拖卡片时锚定卡片左上角 = 收起后球位）。
+ * @param pos - 待校正的锚点。
  */
-function clampCardPos(pos: CardPos, size: { width: number; height: number }): CardPos {
+function clampAnchorToViewport(pos: CardPos): CardPos {
   return {
-    left: Math.min(Math.max(pos.left, CARD_MIN_VISIBLE - size.width), window.innerWidth - CARD_MIN_VISIBLE),
-    top: Math.min(Math.max(pos.top, 0), window.innerHeight - CARD_MIN_VISIBLE),
+    left: Math.min(Math.max(pos.left, 0), window.innerWidth - FAB_SIZE),
+    top: Math.min(Math.max(pos.top, 0), window.innerHeight - FAB_SIZE),
   }
 }
 
@@ -673,6 +672,8 @@ export function createCard(source: CardSource): () => ReactElement {
   return function BrowserFsCard(): ReactElement {
     const state = useSyncExternalStore(source.subscribe, source.getSnapshot)
     const { actions } = source
+    /** 当前语言的字典（跟随 dsh 的 <html lang>）。 */
+    const s = STRINGS[state.lang]
     const [editingName, setEditingName] = useState(false)
     const [draftName, setDraftName] = useState('')
     /** 自由定位（null = 默认右下角）；初值取本地记忆。卡片与圆球共用同一 pos——两形态同一位置。 */
@@ -687,38 +688,36 @@ export function createCard(source: CardSource): () => ReactElement {
       baseTop: number
       moved: boolean
     } | null>(null)
-    /** 真拖拽后要吞掉紧随的 click（如按在「—」上起拖/拖完圆球，松手不该触发折叠/展开）。 */
-    const suppressClickRef = useRef(false)
+    /** 进行中的手势的 window 监听拆卸器（卸载兜底用）。 */
+    const dragCleanupRef = useRef<(() => void) | null>(null)
+    /** 是否正在拖拽（拖中渲染绕过 panelFit 钳位，直接贴指针）。 */
+    const [dragging, setDragging] = useState(false)
     /** 展开面板的视口钳位结果（纯显示用，不写回 pos——球的记忆位置不受钳位影响）。 */
     const [panelFit, setPanelFit] = useState<CardPos | null>(null)
-
-    /** 按当前挂载形态（卡片或圆球）的实际尺寸 clamp（都未挂载时按零尺寸兜底）。 */
-    const clampToViewport = (p: CardPos): CardPos => {
-      const el = cardRef.current ?? fabRef.current
-      return clampCardPos(p, { width: el?.offsetWidth ?? 0, height: el?.offsetHeight ?? 0 })
-    }
 
     // 恢复的位置可能已出视口（窗口此后变小过）：挂载后 clamp 一次；窗口
     // resize 时同样 clamp（并让展开面板重算钳位）。校正结果不落盘——存储的
     // 仍是用户拖放的点。
     useEffect(() => {
       const clampIntoView = (): void => {
-        setPos(prev => (prev === null ? prev : clampToViewport(prev)))
+        setPos(prev => (prev === null ? prev : clampAnchorToViewport(prev)))
         setPanelFit(null)
       }
       clampIntoView()
       window.addEventListener('resize', clampIntoView)
       return () => { window.removeEventListener('resize', clampIntoView) }
-      // clampToViewport 只读 ref，无需进依赖。
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
+
+    // 卸载兜底：手势途中组件卸载时摘掉 window 监听。
+    useEffect(() => () => { dragCleanupRef.current?.() }, [])
 
     // 展开面板的视口钳位：以球位（pos；null 时把默认右下角换算成等价锚点）
     // 为锚，用真实渲染尺寸经 fitPanelToViewport 校正——优先翻转展开方向，
-    // 仍出界再 clamp 进边距。layout effect 每渲染跑一次：首次展开/拖拽/
-    // 内容撑高/resize 后都在绘制前同步收敛（校正值不变时原样返回，不循环）。
+    // 仍出界再 clamp 进边距。拖拽进行中跳过（拖中显示直接贴指针，松手后
+    // 才收敛回视口）。layout effect 每渲染跑一次：首次展开/松手/内容撑高/
+    // resize 后都在绘制前同步收敛（校正值不变时原样返回，不循环）。
     useLayoutEffect(() => {
-      if (state.collapsed) return
+      if (state.collapsed || dragRef.current !== null) return
       const card = cardRef.current
       if (card === null) return
       const vw = window.innerWidth
@@ -732,13 +731,20 @@ export function createCard(source: CardSource): () => ReactElement {
       setPanelFit(prev => (prev !== null && prev.left === target.left && prev.top === target.top ? prev : target))
     })
 
-    // 拖拽把手（卡片标题行 / 圆球共用同一套）：pointer events 一统鼠标/触摸。
+    /**
+     * 拖拽把手（卡片标题行 / 圆球共用）：pointerdown 起于把手，move/up 挂在
+     * window 上跟踪全程。注意两个坑（都踩过）：不要 pointerdown 即
+     * setPointerCapture——捕获会把 click 重定向到把手，里面的「—」收起钮
+     * 点不中（122486e）；也不要越过阈值才捕获——快速甩动时指针在捕获前就
+     * 离开把手，move 事件到不了把手，拖动直接丢失（"不跟手"）。window 监听
+     * 两个都不沾。
+     */
     const onHandlePointerDown = (event: React.PointerEvent<HTMLElement>): void => {
       if (event.pointerType === 'mouse' && event.button !== 0) return
       const el = cardRef.current ?? fabRef.current
       if (el === null) return
       const rect = el.getBoundingClientRect()
-      dragRef.current = {
+      const drag = {
         pointerId: event.pointerId,
         startX: event.clientX,
         startY: event.clientY,
@@ -746,48 +752,55 @@ export function createCard(source: CardSource): () => ReactElement {
         baseTop: rect.top,
         moved: false,
       }
-      // 注意：这里不能 setPointerCapture——捕获会把后续 click 重定向到把手，
-      // 上面的「—」收起/圆球展开就永远点不中。等真正越过拖拽阈值再捕获。
-    }
-
-    const onHandlePointerMove = (event: React.PointerEvent<HTMLElement>): void => {
-      const drag = dragRef.current
-      if (drag === null || event.pointerId !== drag.pointerId) return
-      const dx = event.clientX - drag.startX
-      const dy = event.clientY - drag.startY
-      if (!drag.moved) {
-        // 阈值内不动位置：保住把手上的点击语义。
-        if (Math.abs(dx) <= DRAG_THRESHOLD_PX && Math.abs(dy) <= DRAG_THRESHOLD_PX) return
-        drag.moved = true
-        // 越过阈值才算开拖：此刻捕获，保证移出把手仍跟随。
-        event.currentTarget.setPointerCapture(event.pointerId)
-      }
-      setPos({ left: drag.baseLeft + dx, top: drag.baseTop + dy })
-    }
-
-    const endDrag = (event: React.PointerEvent<HTMLElement>): void => {
-      const drag = dragRef.current
-      if (drag === null || event.pointerId !== drag.pointerId) return
-      dragRef.current = null
-      if (!drag.moved) return
-      suppressClickRef.current = true
-      setPos(prev => {
-        const clamped = clampToViewport(prev ?? { left: drag.baseLeft, top: drag.baseTop })
-        try {
-          localStorage.setItem(CARD_POS_KEY, JSON.stringify(clamped))
-        } catch {
-          // localStorage 不可用：位置只在本次页面存活。
+      dragRef.current = drag
+      const onMove = (e: PointerEvent): void => {
+        if (e.pointerId !== drag.pointerId) return
+        const dx = e.clientX - drag.startX
+        const dy = e.clientY - drag.startY
+        if (!drag.moved) {
+          // 阈值内不动位置：保住把手上的点击语义。
+          if (Math.abs(dx) <= DRAG_THRESHOLD_PX && Math.abs(dy) <= DRAG_THRESHOLD_PX) return
+          drag.moved = true
+          setDragging(true)
         }
-        return clamped
-      })
-    }
-
-    /** 真拖拽后的 click 一律吞掉（卡片根/圆球的 onClickCapture 共用）。 */
-    const swallowClickAfterDrag = (event: React.SyntheticEvent): void => {
-      if (suppressClickRef.current) {
-        suppressClickRef.current = false
-        event.stopPropagation()
-        event.preventDefault()
+        setPos({ left: drag.baseLeft + dx, top: drag.baseTop + dy })
+      }
+      const onUp = (e: PointerEvent): void => {
+        if (e.pointerId !== drag.pointerId) return
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+        dragCleanupRef.current = null
+        dragRef.current = null
+        setDragging(false)
+        if (!drag.moved) return
+        // 真拖拽后紧跟的那次 click 一律吞掉：松手点可能落在把手的按钮上
+        // （不该触发折叠/展开），也可能落在页面其它元素上（不该误点页面）。
+        // window 捕获阶段拦截，500ms 兜底自拆（pointercancel 无 click 的场景）。
+        const swallow = (clickEvent: Event): void => {
+          clickEvent.stopPropagation()
+          clickEvent.preventDefault()
+          window.removeEventListener('click', swallow, true)
+        }
+        window.addEventListener('click', swallow, true)
+        setTimeout(() => { window.removeEventListener('click', swallow, true) }, 500)
+        setPos(prev => {
+          const clamped = clampAnchorToViewport(prev ?? { left: drag.baseLeft, top: drag.baseTop })
+          try {
+            localStorage.setItem(CARD_POS_KEY, JSON.stringify(clamped))
+          } catch {
+            // localStorage 不可用：位置只在本次页面存活。
+          }
+          return clamped
+        })
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+      dragCleanupRef.current = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
       }
     }
 
@@ -803,13 +816,9 @@ export function createCard(source: CardSource): () => ReactElement {
         <button
           ref={fabRef}
           style={{ ...appliedFabStyle, touchAction: 'none', userSelect: 'none' }}
-          title="点击展开 · 按住可拖动"
-          onClickCapture={swallowClickAfterDrag}
+          title={s.fabTip}
           onClick={() => { actions.toggleCollapsed() }}
           onPointerDown={onHandlePointerDown}
-          onPointerMove={onHandlePointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
         >
           📁
           <StatusDot color={statusColor(state)} />
@@ -825,8 +834,8 @@ export function createCard(source: CardSource): () => ReactElement {
 
     /**
      * 展开面板样式：尺寸先兜底（宽高上限收到视口内留 10px 边距，超高内容出
-     * 滚动条），位置优先用钳位结果 panelFit（未算出的首帧用锚点直出，
-     * layout effect 会在绘制前校正）。
+     * 滚动条）；位置拖中直接贴指针（dragging → pos），非拖中用钳位结果
+     * panelFit（未算出的首帧用锚点直出，layout effect 会在绘制前校正）。
      */
     const appliedCardStyle: CSSProperties = (() => {
       const capped: CSSProperties = {
@@ -835,7 +844,7 @@ export function createCard(source: CardSource): () => ReactElement {
         maxHeight: 'calc(100vh - 20px)',
         overflowY: 'auto',
       }
-      const at = panelFit ?? pos
+      const at = dragging ? pos : (panelFit ?? pos)
       if (at === null) return capped
       return { ...capped, right: 'auto', bottom: 'auto', left: `${String(at.left)}px`, top: `${String(at.top)}px` }
     })()
@@ -847,33 +856,29 @@ export function createCard(source: CardSource): () => ReactElement {
       <div
         ref={cardRef}
         style={appliedCardStyle}
-        onClickCapture={swallowClickAfterDrag}
       >
         <div
           style={{
             display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px',
             cursor: 'grab', touchAction: 'none', userSelect: 'none',
           }}
-          title="拖拽移动卡片"
+          title={s.handleTip}
           onPointerDown={onHandlePointerDown}
-          onPointerMove={onHandlePointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
         >
           <span style={{
             width: '8px', height: '8px', borderRadius: '50%',
             background: statusColor(state), flexShrink: 0,
           }} />
-          <strong style={{ flex: 1 }}>browser-fs 浏览器文件</strong>
+          <strong style={{ flex: 1 }}>{s.cardTitle}</strong>
           <button
             style={{ ...buttonStyle, padding: '0 7px', lineHeight: 1.2 }}
             onClick={() => { actions.toggleCollapsed() }}
-            title="收起"
+            title={s.collapseTip}
           >
             —
           </button>
         </div>
-        <div style={{ marginBottom: '4px', opacity: 0.9 }}>{statusText(state)}</div>
+        <div style={{ marginBottom: '4px', opacity: 0.9 }}>{statusText(state, s)}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '8px', opacity: 0.85 }}>
           {editingName
             ? (
@@ -881,7 +886,7 @@ export function createCard(source: CardSource): () => ReactElement {
                 <input
                   autoFocus
                   value={draftName}
-                  placeholder="留空用 UA 派生标签"
+                  placeholder={s.namePlaceholder}
                   style={{
                     flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)',
                     border: '1px solid rgba(255,255,255,0.25)', borderRadius: '6px',
@@ -898,10 +903,10 @@ export function createCard(source: CardSource): () => ReactElement {
             )
             : (
               <>
-                <span style={{ ...rowTextStyle, flex: 1 }} title={state.label}>本机：{state.label}</span>
+                <span style={{ ...rowTextStyle, flex: 1 }} title={state.label}>{s.localLabel(state.label)}</span>
                 <button
                   style={{ ...buttonStyle, padding: '0 5px', fontSize: '10px', flexShrink: 0 }}
-                  title="编辑设备昵称"
+                  title={s.editNameTip}
                   onClick={() => {
                     setDraftName(state.nickname ?? '')
                     setEditingName(true)
@@ -917,14 +922,14 @@ export function createCard(source: CardSource): () => ReactElement {
             ? state.compat
               ? (
                 <>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatDir() }}>重选目录</button>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatFiles() }}>选文件</button>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>清除</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatDir() }}>{s.reselectDir}</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatFiles() }}>{s.reselectFiles}</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>{s.clear}</button>
                   {/* 兼容模式缓存即选择时快照，刷新 = 按上次形态重开选择器。 */}
                   <button
                     style={buttonStyle}
                     disabled={state.busy}
-                    title="刷新目录（重新选择）"
+                    title={s.refreshTipCompat}
                     onClick={() => { actions.pickCompatRefresh() }}
                   >
                     ↻
@@ -933,27 +938,27 @@ export function createCard(source: CardSource): () => ReactElement {
               )
               : (
                 <>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>解除授权</button>
-                  <button style={buttonStyle} title="刷新目录" onClick={() => { treeApi.current?.refresh() }}>↻</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>{s.pickNew}</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.revoke() }}>{s.revoke}</button>
+                  <button style={buttonStyle} title={s.refreshTipFull} onClick={() => { treeApi.current?.refresh() }}>↻</button>
                 </>
               )
             : state.pickerAvailable
               ? (
                 <>
                   <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.authorize() }}>
-                    {state.permission === 'none' ? '授权目录' : '重新授权'}
+                    {state.permission === 'none' ? s.authorize : s.reauthorize}
                   </button>
                   {state.permission !== 'none' && (
-                    <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>更换目录</button>
+                    <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickNew() }}>{s.pickNew}</button>
                   )}
                 </>
               )
               : (
                 <>
                   {/* 兼容模式授权区双入口：目录 / 多选文件，不再只靠属性探测自动二选一。 */}
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatDir() }}>选择目录</button>
-                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatFiles() }}>选多个文件</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatDir() }}>{s.compatDir}</button>
+                  <button style={buttonStyle} disabled={state.busy} onClick={() => { actions.pickCompatFiles() }}>{s.compatFiles}</button>
                 </>
               )}
         </div>
@@ -964,27 +969,27 @@ export function createCard(source: CardSource): () => ReactElement {
               background: 'rgba(251, 188, 4, 0.25)', color: '#fbbc04',
               fontSize: '10px', marginBottom: '4px',
             }}>
-              兼容模式
+              {s.compatBadge}
             </span>
             <div>
-              当前页面非安全上下文，File System Access API 不可用：只能只读浏览，刷新后需重选。
+              {s.compatDesc}
             </div>
             <div style={{ marginTop: '4px' }}>
-              获得完整模式（可写 + 持久授权）：
+              {s.compatHowtoFull}
               <div style={{ marginTop: '2px', fontFamily: 'monospace', fontSize: '11px', opacity: 0.9 }}>
-                ① SSH 转发：ssh -L 9101:127.0.0.1:9101 用户@主机
+                {s.compatSsh}
               </div>
               <div style={{ fontFamily: 'monospace', fontSize: '11px', opacity: 0.9 }}>
-                ② Chrome：chrome://flags/#unsafely-treat-insecure-origin-as-secure
+                {s.compatFlag}
               </div>
               <div style={{ fontFamily: 'monospace', fontSize: '11px', opacity: 0.9 }}>
-                ③ 改用 HTTPS 访问
+                {s.compatHttps}
               </div>
             </div>
           </div>
         )}
         {state.permission === 'granted' && state.backend !== null && (
-          <DirTree key={state.rootVersion} backend={state.backend} apiRef={treeApi} />
+          <DirTree key={state.rootVersion} backend={state.backend} apiRef={treeApi} s={s} />
         )}
         {state.error !== null && (
           <div style={{ marginTop: '6px', color: '#f28b82' }}>{state.error}</div>
@@ -992,7 +997,7 @@ export function createCard(source: CardSource): () => ReactElement {
         {state.error !== null && window.self !== window.top && (
           <div style={{ marginTop: '6px' }}>
             <a href={location.origin} target="_blank" rel="noreferrer" style={{ color: '#8ab4f8' }}>
-              ↗ 在独立标签页打开本页完成授权
+              {s.iframeAuthLink}
             </a>
           </div>
         )}
