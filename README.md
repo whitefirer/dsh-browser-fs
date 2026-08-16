@@ -1,5 +1,9 @@
 # dsh-browser-fs
 
+**中文** | [English](README_EN.md)
+
+[![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#tools--capabilities)
+
 让 dsh 的 agent 读写**浏览器所在机器**的本地文件。dsh 自带的 fs 工具只能摸宿主机；
 远程部署时浏览器在别的机器上，agent 够不到你本地的文件。本插件补上这个缺口：
 
@@ -86,7 +90,9 @@ yaml/json/toml/md/html/css/xml/sql 等，无映射退回纯文本），先截断
 📁 圆钮与卡片共用同一位置（卡片拖到哪儿球就在哪儿，展开也回原位），圆球
 同样按住可拖——没移动过的松手才展开。展开的面板自带视口钳位：球在右/下
 半屏时面板向左/上翻转展开，翻转仍出界再 clamp 进 10px 边距（宽高上限收到
-视口内）；钳位只影响面板显示，不改球的记忆位置。
+视口内）；钳位只影响面板显示，不改球的记忆位置。卡片/圆球/预览窗渲染在
+body 级层级（z-100/200），压过常见覆盖层（如侧边栏插件面板），点击不被
+别家插件抢走，同时低于 dsh 自身模态框（z-1000+）。
 
 授权按钮行末尾的「↻」是刷新目录：
 
@@ -122,6 +128,10 @@ File System Access API 是安全上下文门控 API：只在 HTTPS 或 localhost
 | --- | --- | --- |
 | 触发 | 安全上下文（HTTPS/localhost） | 非安全上下文自动降级 |
 | 选择方式 | 系统目录选择器（showDirectoryPicker） | 双入口：input[webkitdirectory] 选目录 / multiple 选多个文件 |
+| list / read | ✓ | ✓（File 内存映射，read 按 slice 截断不整读） |
+| write / 变更 | ✓ | ✗ 明确报错「兼容模式只读…」 |
+| 授权持久化 | ✓ IndexedDB，刷新自动恢复 | ✗ 无句柄可存，刷新后需重选（状态行有提示） |
+| 目录树浏览 | ✓ | ✓ 同路径（后端抽象两模式共用） |
 
 **移动端行为**：兼容模式授权区是并排双入口——「选择目录」与「选多个文件」，
 不再只靠属性探测自动二选一；选择器 input 用离屏定位（非 display:none，
@@ -129,10 +139,6 @@ File System Access API 是安全上下文门控 API：只在 HTTPS 或 localhost
 可能形同虚设（webkitdirectory 属性在、选完返回 0 个文件）：此时卡片显示明确
 错误「没读到文件……请改用「选多个文件」」，且此后目录入口自动改走多选，绝不
 静默无反馈。授权成功后状态行显示所选内容（目录名或「N 个文件」）。
-| list / read | ✓ | ✓（File 内存映射，read 按 slice 截断不整读） |
-| write / 变更 | ✓ | ✗ 明确报错「兼容模式只读…」 |
-| 授权持久化 | ✓ IndexedDB，刷新自动恢复 | ✗ 无句柄可存，刷新后需重选（状态行有提示） |
-| 目录树浏览 | ✓ | ✓ 同路径（后端抽象两模式共用） |
 
 兼容模式下卡片显示「兼容模式」徽标与说明。获得完整模式的三种途径：
 

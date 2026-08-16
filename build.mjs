@@ -37,7 +37,7 @@ await build({
 
 // 模块表可回答的 platform modules（packages/client/web/src/platform.ts 的
 // PLATFORM_MODULES 子集）：其余依赖一律 inline。
-const CLIENT_EXTERNALS = ['react', 'react/jsx-runtime']
+const CLIENT_EXTERNALS = ['react', 'react/jsx-runtime', 'react-dom']
 
 await build({
   ...shared,

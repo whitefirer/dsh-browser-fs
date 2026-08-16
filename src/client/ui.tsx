@@ -1,8 +1,11 @@
 /**
- * 授权入口 UI：挂在 shell.overlay 层的浮动卡片（layer 本身 click-through，
- * 卡片根元素自行恢复 pointer events；默认 fixed 右下角小卡，标题行可作
- * 拖拽把手自由定位，位置存 localStorage 并在拖动结束/窗口 resize 时
- * clamp 进视口）。
+ * 授权入口 UI：注册在 shell.overlay 槽位，但卡片/圆球/预览窗一律
+ * createPortal 到 document.body 渲染——shell.overlay 层自身 z-20 的层叠
+ * 上下文会封顶内部一切 z-index，压不过应用侧 fixed 层（better-sidebar
+ * 面板 z-50/弹件 z-60）；body 级自立层级：卡片/球 z-100、预览窗 z-200，
+ * 均低于 dsh 自身模态/toast（1000/1100）。无 Shadow DOM，同层叠上下文
+ * 直接比 z-index。默认 fixed 右下角小卡，标题行可作拖拽把手自由定位，
+ * 位置存 localStorage 并在拖动结束/窗口 resize 时 clamp 进视口。
  *
  * 两种形态（共用同一 pos——卡片拖到哪儿，收起后球就在哪儿，展开也回原位）：
  *  - 展开：状态点 + 目录名 + 授权按钮组 + 「目录内容」懒加载树 + 「—」收起钮；
@@ -22,6 +25,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactElement } from 'react'
 import { DEFAULT_HIGHLIGHT_PATH, type RosterExecutor } from '../wire.js'
 import type { FsBackend } from './fs.js'
@@ -96,7 +100,10 @@ const cardStyle: CSSProperties = {
   position: 'fixed',
   right: '16px',
   bottom: '16px',
-  zIndex: 1000,
+  // 层级调研（2026-08 真机）：shell.overlay 层本身 z-20，better-sidebar 面板
+  // fixed z-50/弹件 z-60 会盖住层内任何值——故卡片 portal 到 body 自立层级。
+  // 100：压过侧边栏（50/60），远低于 dsh 自身模态/toast（1000/1100）。
+  zIndex: 100,
   pointerEvents: 'auto',
   minWidth: '240px',
   maxWidth: '340px',
@@ -120,12 +127,12 @@ const buttonStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
-/** 收起后的圆钮。 */
+/** 收起后的圆钮（层级与卡片同档，见 cardStyle 注释）。 */
 const fabStyle: CSSProperties = {
   position: 'fixed',
   right: '16px',
   bottom: '16px',
-  zIndex: 1000,
+  zIndex: 100,
   pointerEvents: 'auto',
   width: '36px',
   height: '36px',
@@ -239,7 +246,8 @@ function loadHighlighter(): Promise<HighlightModule> {
 const previewMaskStyle: CSSProperties = {
   position: 'fixed',
   inset: 0,
-  zIndex: 1100,
+  // 预览窗压过卡片/球（100），仍低于 dsh 自身模态（1000）。
+  zIndex: 200,
   background: 'rgba(0, 0, 0, 0.55)',
   display: 'flex',
   alignItems: 'center',
@@ -350,7 +358,8 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
     }
   })()
 
-  return (
+  // 预览窗同样 portal 到 body（与卡片同一层级策略，z-200 压过卡片 z-100）。
+  return createPortal(
     <div style={previewMaskStyle} onClick={onClose}>
       <div style={previewCardStyle} onClick={(event) => { event.stopPropagation() }}>
         {/* 固定标题栏：文件名（左，过长截断）+ 大小/截断标注（中）+ ✕（右钉住），不随内容滚动。 */}
@@ -415,7 +424,8 @@ function FilePreview({ backend, path, onClose }: { backend: FsBackend; path: str
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -789,7 +799,7 @@ export function createCard(source: CardSource): () => ReactElement {
       const appliedFabStyle: CSSProperties = pos === null
         ? fabStyle
         : { ...fabStyle, right: 'auto', bottom: 'auto', left: `${String(pos.left)}px`, top: `${String(pos.top)}px` }
-      return (
+      return createPortal(
         <button
           ref={fabRef}
           style={{ ...appliedFabStyle, touchAction: 'none', userSelect: 'none' }}
@@ -803,7 +813,8 @@ export function createCard(source: CardSource): () => ReactElement {
         >
           📁
           <StatusDot color={statusColor(state)} />
-        </button>
+        </button>,
+        document.body,
       )
     }
 
@@ -829,7 +840,10 @@ export function createCard(source: CardSource): () => ReactElement {
       return { ...capped, right: 'auto', bottom: 'auto', left: `${String(at.left)}px`, top: `${String(at.top)}px` }
     })()
 
-    return (
+    // portal 到 body：shell.overlay 层（z-20）的层叠上下文会封顶内部一切
+    // z-index，压不过应用侧 fixed 层（better-sidebar z-50/60）；自立 body 级
+    // 层级才拿得到真实遮挡序。
+    return createPortal(
       <div
         ref={cardRef}
         style={appliedCardStyle}
@@ -982,7 +996,8 @@ export function createCard(source: CardSource): () => ReactElement {
             </a>
           </div>
         )}
-      </div>
+      </div>,
+      document.body,
     )
   }
 }

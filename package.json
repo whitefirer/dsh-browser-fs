@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-fs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dsh plugin: let the agent list/read/write files inside a browser-authorized local directory (File System Access API) through a WebSocket relay",
   "type": "module",
   "main": "lib/index.js",
@@ -40,6 +40,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.7",
     "@types/wicg-file-system-access": "^2023.10.5",
     "@types/ws": "^8.5.10",
     "esbuild": "^0.25.0",
