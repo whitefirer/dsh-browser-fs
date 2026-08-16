@@ -6,6 +6,9 @@
  *
  * 两种形态（共用同一 pos——卡片拖到哪儿，收起后球就在哪儿，展开也回原位）：
  *  - 展开：状态点 + 目录名 + 授权按钮组 + 「目录内容」懒加载树 + 「—」收起钮；
+ *    展开面板经 fitPanelToViewport（panel-fit.ts）钳位——以球位为锚优先翻转
+ *    展开方向（球在右/下半屏就向左/上展开），仍出界再 clamp 进 10px 边距，
+ *    宽高上限收到视口内；钳位只影响面板显示，不改球的记忆位置；
  *  - 收起：36px 圆钮（📁 + 状态点），点一下展开；圆球同样按住可拖（与卡片
  *    把手同一套 4px 阈值/越过阈值才捕获的逻辑，不移动就松手才当点击）。
  *    折叠状态由 apply 闭包持久化到 localStorage（本文件只读快照）。
@@ -18,10 +21,11 @@
  * @module dsh-browser-fs/client/ui
  */
 
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { DEFAULT_HIGHLIGHT_PATH, type RosterExecutor } from '../wire.js'
 import type { FsBackend } from './fs.js'
+import { FAB_SIZE, fitPanelToViewport } from './panel-fit.js'
 import {
   MAX_IMAGE_PREVIEW_BYTES,
   TEXT_PREVIEW_BYTES,
@@ -675,6 +679,8 @@ export function createCard(source: CardSource): () => ReactElement {
     } | null>(null)
     /** 真拖拽后要吞掉紧随的 click（如按在「—」上起拖/拖完圆球，松手不该触发折叠/展开）。 */
     const suppressClickRef = useRef(false)
+    /** 展开面板的视口钳位结果（纯显示用，不写回 pos——球的记忆位置不受钳位影响）。 */
+    const [panelFit, setPanelFit] = useState<CardPos | null>(null)
 
     /** 按当前挂载形态（卡片或圆球）的实际尺寸 clamp（都未挂载时按零尺寸兜底）。 */
     const clampToViewport = (p: CardPos): CardPos => {
@@ -683,15 +689,38 @@ export function createCard(source: CardSource): () => ReactElement {
     }
 
     // 恢复的位置可能已出视口（窗口此后变小过）：挂载后 clamp 一次；窗口
-    // resize 时同样 clamp。校正结果不落盘——存储的仍是用户拖放的点。
+    // resize 时同样 clamp（并让展开面板重算钳位）。校正结果不落盘——存储的
+    // 仍是用户拖放的点。
     useEffect(() => {
-      const clampIntoView = (): void => { setPos(prev => (prev === null ? prev : clampToViewport(prev))) }
+      const clampIntoView = (): void => {
+        setPos(prev => (prev === null ? prev : clampToViewport(prev)))
+        setPanelFit(null)
+      }
       clampIntoView()
       window.addEventListener('resize', clampIntoView)
       return () => { window.removeEventListener('resize', clampIntoView) }
       // clampToViewport 只读 ref，无需进依赖。
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
+
+    // 展开面板的视口钳位：以球位（pos；null 时把默认右下角换算成等价锚点）
+    // 为锚，用真实渲染尺寸经 fitPanelToViewport 校正——优先翻转展开方向，
+    // 仍出界再 clamp 进边距。layout effect 每渲染跑一次：首次展开/拖拽/
+    // 内容撑高/resize 后都在绘制前同步收敛（校正值不变时原样返回，不循环）。
+    useLayoutEffect(() => {
+      if (state.collapsed) return
+      const card = cardRef.current
+      if (card === null) return
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      const anchor = pos ?? { left: vw - 16 - FAB_SIZE, top: vh - 16 - FAB_SIZE }
+      const target = fitPanelToViewport(
+        anchor,
+        { width: card.offsetWidth, height: card.offsetHeight },
+        { width: vw, height: vh },
+      )
+      setPanelFit(prev => (prev !== null && prev.left === target.left && prev.top === target.top ? prev : target))
+    })
 
     // 拖拽把手（卡片标题行 / 圆球共用同一套）：pointer events 一统鼠标/触摸。
     const onHandlePointerDown = (event: React.PointerEvent<HTMLElement>): void => {
@@ -753,6 +782,8 @@ export function createCard(source: CardSource): () => ReactElement {
     }
 
     if (state.collapsed) {
+      // 收起即丢弃展开钳位（render-phase 调整）：下次展开按当时球位/视口重算。
+      if (panelFit !== null) setPanelFit(null)
       // 圆球与卡片共用 pos：卡片拖到哪儿，收起后球就在哪儿，展开也回原位。
       // 球同样可拖（同一套阈值/捕获逻辑）；没移动过的松手才展开。
       const appliedFabStyle: CSSProperties = pos === null
@@ -781,10 +812,22 @@ export function createCard(source: CardSource): () => ReactElement {
       setEditingName(false)
     }
 
-    /** 有自由定位时改用 left/top 定位；否则保持默认右下角。 */
-    const appliedCardStyle: CSSProperties = pos === null
-      ? cardStyle
-      : { ...cardStyle, right: 'auto', bottom: 'auto', left: `${String(pos.left)}px`, top: `${String(pos.top)}px` }
+    /**
+     * 展开面板样式：尺寸先兜底（宽高上限收到视口内留 10px 边距，超高内容出
+     * 滚动条），位置优先用钳位结果 panelFit（未算出的首帧用锚点直出，
+     * layout effect 会在绘制前校正）。
+     */
+    const appliedCardStyle: CSSProperties = (() => {
+      const capped: CSSProperties = {
+        ...cardStyle,
+        maxWidth: 'min(340px, calc(100vw - 20px))',
+        maxHeight: 'calc(100vh - 20px)',
+        overflowY: 'auto',
+      }
+      const at = panelFit ?? pos
+      if (at === null) return capped
+      return { ...capped, right: 'auto', bottom: 'auto', left: `${String(at.left)}px`, top: `${String(at.top)}px` }
+    })()
 
     return (
       <div

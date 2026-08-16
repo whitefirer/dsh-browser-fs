@@ -162,6 +162,7 @@ await new Promise((resolve) => {
       'src/client/device.ts',
       'src/client/preview.ts',
       'src/client/compat-picker.ts',
+      'src/client/panel-fit.ts',
     ],
     outdir: join(out, '..', 'compat-out'),
     bundle: true,
@@ -173,6 +174,7 @@ await new Promise((resolve) => {
   const deviceUrl = new URL(`file://${join(out, '..', 'compat-out', 'device.js')}`)
   const previewUrl = new URL(`file://${join(out, '..', 'compat-out', 'preview.js')}`)
   const pickerUrl = new URL(`file://${join(out, '..', 'compat-out', 'compat-picker.js')}`)
+  const panelFitUrl = new URL(`file://${join(out, '..', 'compat-out', 'panel-fit.js')}`)
   const { createFilesBackend } = await import(backendUrl.href)
   const { deriveDeviceLabel } = await import(deviceUrl.href)
   const {
@@ -185,6 +187,28 @@ await new Promise((resolve) => {
     previewKindFor,
   } = await import(previewUrl.href)
   const { classifyCompatChange, resolveCompatInput } = await import(pickerUrl.href)
+  const { fitPanelToViewport } = await import(panelFitUrl.href)
+
+  // 展开面板视口钳位：右/下边缘翻转展开方向，翻转不够再 clamp 进 10px 边距
+  {
+    const panel = { width: 340, height: 300 }
+    // 桌面 1200x800：球在右半屏 → 向左展开（面板右缘对齐球右缘），不 clamp
+    const flipX = fitPanelToViewport({ left: 1000, top: 100 }, panel, { width: 1200, height: 800 })
+    check('panel fit flip left', flipX.left === 1000 + 36 - 340 && flipX.top === 100)
+    // 球在下半屏 → 向上展开（底缘对齐球底缘）
+    const flipY = fitPanelToViewport({ left: 100, top: 700 }, panel, { width: 1200, height: 800 })
+    check('panel fit flip up', flipY.top === 700 + 36 - 300 && flipY.left === 100)
+    // 移动端 390x844：球贴右边缘，翻转仍不够 → clamp 进边距，整面板可见
+    const mobile = fitPanelToViewport({ left: 350, top: 780 }, panel, { width: 390, height: 844 })
+    check('panel fit mobile clamp', mobile.left >= 10 && mobile.left + panel.width <= 380
+      && mobile.top >= 10 && mobile.top + panel.height <= 834)
+    // 极端：面板比视口还大 → clamp 到边距（优先保住左上角）
+    const huge = fitPanelToViewport({ left: 200, top: 400 }, { width: 800, height: 1200 }, { width: 390, height: 844 })
+    check('panel fit oversized', huge.left === 10 && huge.top === 10)
+    // 无需校正时原样透传（左上区默认向右下展开）
+    const plain = fitPanelToViewport({ left: 12, top: 12 }, panel, { width: 1200, height: 800 })
+    check('panel fit passthrough', plain.left === 12 && plain.top === 12)
+  }
 
   // 选择器纯决策：双入口形态解析（失效前科/能力缺失时目录入口自动退多选）
   check('compat picker shape', resolveCompatInput('directory', { dirSupported: true, dirBroken: false }).directory === true
