@@ -188,7 +188,7 @@ await new Promise((resolve) => {
     previewKindFor,
   } = await import(previewUrl.href)
   const { classifyCompatChange, resolveCompatInput } = await import(pickerUrl.href)
-  const { fitPanelToViewport } = await import(panelFitUrl.href)
+  const { clampPanelToViewport, fitPanelToViewport } = await import(panelFitUrl.href)
   const i18nUrl = new URL(`file://${join(out, '..', 'compat-out', 'i18n.js')}`)
   const { STRINGS, langFromTag } = await import(i18nUrl.href)
 
@@ -222,6 +222,13 @@ await new Promise((resolve) => {
     // 无需校正时原样透传（左上区默认向右下展开）
     const plain = fitPanelToViewport({ left: 12, top: 12 }, panel, { width: 1200, height: 800 })
     check('panel fit passthrough', plain.left === 12 && plain.top === 12)
+    // clampPanelToViewport（拖放/resize 用，不翻转）：右下溢出→收回边距；视口内→原样
+    const c1 = clampPanelToViewport({ left: 1150, top: 780 }, panel, { width: 390, height: 844 })
+    check('panel clamp only (no flip)', c1.left === 40 && c1.top === 534)
+    const c2 = clampPanelToViewport({ left: 200, top: 200 }, panel, { width: 1200, height: 800 })
+    check('panel clamp passthrough', c2.left === 200 && c2.top === 200)
+    const c3 = clampPanelToViewport({ left: -50, top: -20 }, panel, { width: 1200, height: 800 })
+    check('panel clamp negative', c3.left === 10 && c3.top === 10)
   }
 
   // 选择器纯决策：双入口形态解析（失效前科/能力缺失时目录入口自动退多选）

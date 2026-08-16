@@ -7,13 +7,13 @@
  * 直接比 z-index。默认 fixed 右下角小卡，标题行可作拖拽把手自由定位，
  * 位置存 localStorage 并在拖动结束/窗口 resize 时 clamp 进视口。
  *
- * 两种形态（共用同一 pos——卡片拖到哪儿，收起后球就在哪儿，展开也回原位）：
+ * 两种形态（共用同一 pos 锚点 = 球位/卡片左上角）：
  *  - 展开：状态点 + 目录名 + 授权按钮组 + 「目录内容」懒加载树 + 「—」收起钮；
- *    展开面板经 fitPanelToViewport（panel-fit.ts）钳位——以球位为锚优先翻转
- *    展开方向（球在右/下半屏就向左/上展开），仍出界再 clamp 进 10px 边距，
- *    宽高上限收到视口内；钳位只影响面板显示，不改球的记忆位置；
+ *    展开面板从未拖过时以球位为锚推导初始位（允许翻转方向，出界 clamp 进
+ *    10px 边距，宽高上限收到视口内）；一旦被拖过就停在拖放处（只 clamp 不
+ *    翻转），面板位跨收起/展开与刷新记忆（与锚点同一个 localStorage key）；
  *  - 收起：36px 圆钮（📁 + 状态点），点一下展开；圆球同样按住可拖（与卡片
- *    把手同一套 4px 阈值/越过阈值才捕获的逻辑，不移动就松手才当点击）。
+ *    把手同一套 4px 阈值 + window 全程监听逻辑，不移动就松手才当点击）。
  *    折叠状态由 apply 闭包持久化到 localStorage（本文件只读快照）。
  *
  * 目录树状态（展开集合/已加载层级）是组件内的 useState —— 纯 viewing state，
@@ -30,7 +30,7 @@ import type { CSSProperties, ReactElement } from 'react'
 import { DEFAULT_HIGHLIGHT_PATH, type RosterExecutor } from '../wire.js'
 import type { FsBackend } from './fs.js'
 import { STRINGS, type Lang, type Strings } from './i18n.js'
-import { FAB_SIZE, fitPanelToViewport } from './panel-fit.js'
+import { FAB_SIZE, clampPanelToViewport, fitPanelToViewport } from './panel-fit.js'
 import {
   MAX_IMAGE_PREVIEW_BYTES,
   TEXT_PREVIEW_BYTES,
@@ -633,19 +633,48 @@ const CARD_POS_KEY = 'dsh-browser-fs:card-pos'
 /** 位移超过该像素才算拖拽；低于此按点击处理（不吃折叠/昵称/授权按钮的点击）。 */
 const DRAG_THRESHOLD_PX = 4
 
-/** 读本地记忆的卡片位置；缺失/畸形/localStorage 不可用一律回 null（默认位）。 */
-function readStoredCardPos(): CardPos | null {
+/** 本地记忆：anchor 为球位；panel 为展开面板被用户拖放后的记忆位（可缺省）。 */
+interface StoredCardPos {
+  anchor: CardPos
+  panel: CardPos | null
+}
+
+/** 读本地记忆；缺失/畸形/localStorage 不可用一律回 null（默认位）。 */
+function readStoredCardPos(): StoredCardPos | null {
   try {
     const raw = localStorage.getItem(CARD_POS_KEY)
     if (raw === null) return null
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== 'object' || parsed === null) return null
-    const { left, top } = parsed as { left?: unknown; top?: unknown }
+    const { left, top, panel } = parsed as { left?: unknown; top?: unknown; panel?: unknown }
     if (typeof left !== 'number' || typeof top !== 'number') return null
     if (!Number.isFinite(left) || !Number.isFinite(top)) return null
-    return { left, top }
+    let panelPos: CardPos | null = null
+    if (typeof panel === 'object' && panel !== null) {
+      const { left: pl, top: pt } = panel as { left?: unknown; top?: unknown }
+      if (typeof pl === 'number' && typeof pt === 'number' && Number.isFinite(pl) && Number.isFinite(pt)) {
+        panelPos = { left: pl, top: pt }
+      }
+    }
+    return { anchor: { left, top }, panel: panelPos }
   } catch {
     return null
+  }
+}
+
+/**
+ * 落盘锚点（球位）与面板记忆位。
+ * @param panel - 面板记忆位；传 undefined 保留已存记忆（拖球不改面板记忆），
+ *   null 表示清除。
+ */
+function writeStoredCardPos(anchor: CardPos, panel: CardPos | null | undefined): void {
+  const kept = panel === undefined ? readStoredCardPos()?.panel ?? null : panel
+  try {
+    localStorage.setItem(CARD_POS_KEY, JSON.stringify(kept === null
+      ? { left: anchor.left, top: anchor.top }
+      : { left: anchor.left, top: anchor.top, panel: kept }))
+  } catch {
+    // localStorage 不可用：位置只在本次页面存活。
   }
 }
 
@@ -676,32 +705,50 @@ export function createCard(source: CardSource): () => ReactElement {
     const s = STRINGS[state.lang]
     const [editingName, setEditingName] = useState(false)
     const [draftName, setDraftName] = useState('')
-    /** 自由定位（null = 默认右下角）；初值取本地记忆。卡片与圆球共用同一 pos——两形态同一位置。 */
-    const [pos, setPos] = useState<CardPos | null>(readStoredCardPos)
+    /** 启动时的本地记忆（只读一次）：anchor = 球位，panel = 面板记忆位。 */
+    const [initialStored] = useState(readStoredCardPos)
+    /** 球位锚点（null = 默认右下角）；卡片拖动时同步移动（= 卡片左上角 = 收起后球位）。 */
+    const [pos, setPos] = useState<CardPos | null>(initialStored?.anchor ?? null)
     const cardRef = useRef<HTMLDivElement | null>(null)
     const fabRef = useRef<HTMLButtonElement | null>(null)
     const dragRef = useRef<{
       pointerId: number
+      /** 拖的是卡片标题行还是圆球（松手时的落盘语义不同）。 */
+      form: 'card' | 'fab'
       startX: number
       startY: number
       baseLeft: number
       baseTop: number
       moved: boolean
+      /** 最近一次 move 的原始目标位（松手收敛用；不依赖可能批处理中的 state）。 */
+      lastLeft: number
+      lastTop: number
     } | null>(null)
     /** 进行中的手势的 window 监听拆卸器（卸载兜底用）。 */
     const dragCleanupRef = useRef<(() => void) | null>(null)
     /** 是否正在拖拽（拖中渲染绕过 panelFit 钳位，直接贴指针）。 */
     const [dragging, setDragging] = useState(false)
-    /** 展开面板的视口钳位结果（纯显示用，不写回 pos——球的记忆位置不受钳位影响）。 */
-    const [panelFit, setPanelFit] = useState<CardPos | null>(null)
+    /**
+     * 展开面板的显示位置（钳位后）。语义：null = 本形态初次展开，以球位为锚
+     * 允许翻转推导；非空 = 用户已摆好/已钳位过，之后只 clamp 不翻转。收起
+     * 不清空——面板位置跨收起/展开保持（卡片拖到哪就停在哪）。
+     */
+    const [panelFit, setPanelFit] = useState<CardPos | null>(initialStored?.panel ?? null)
 
     // 恢复的位置可能已出视口（窗口此后变小过）：挂载后 clamp 一次；窗口
-    // resize 时同样 clamp（并让展开面板重算钳位）。校正结果不落盘——存储的
-    // 仍是用户拖放的点。
+    // resize 时同样 clamp（锚点按球规则，面板按自身尺寸只 clamp 不翻转）。
+    // 校正结果不落盘——存储的仍是用户拖放的点。
     useEffect(() => {
       const clampIntoView = (): void => {
         setPos(prev => (prev === null ? prev : clampAnchorToViewport(prev)))
-        setPanelFit(null)
+        setPanelFit(prev => {
+          if (prev === null) return prev
+          const card = cardRef.current
+          if (card === null) return prev
+          return clampPanelToViewport(prev,
+            { width: card.offsetWidth, height: card.offsetHeight },
+            { width: window.innerWidth, height: window.innerHeight })
+        })
       }
       clampIntoView()
       window.addEventListener('resize', clampIntoView)
@@ -711,23 +758,24 @@ export function createCard(source: CardSource): () => ReactElement {
     // 卸载兜底：手势途中组件卸载时摘掉 window 监听。
     useEffect(() => () => { dragCleanupRef.current?.() }, [])
 
-    // 展开面板的视口钳位：以球位（pos；null 时把默认右下角换算成等价锚点）
-    // 为锚，用真实渲染尺寸经 fitPanelToViewport 校正——优先翻转展开方向，
-    // 仍出界再 clamp 进边距。拖拽进行中跳过（拖中显示直接贴指针，松手后
-    // 才收敛回视口）。layout effect 每渲染跑一次：首次展开/松手/内容撑高/
-    // resize 后都在绘制前同步收敛（校正值不变时原样返回，不循环）。
+    // 展开面板的视口钳位：panelFit 为空（初次展开）时以球位为锚、允许翻转
+    // 展开方向；非空时只 clamp（尊重用户拖放的位置）。拖拽进行中跳过（拖中
+    // 显示直接贴指针）。layout effect 每渲染跑一次，绘制前同步收敛（校正值
+    // 不变时原样返回，不循环）。
     useLayoutEffect(() => {
       if (state.collapsed || dragRef.current !== null) return
       const card = cardRef.current
       if (card === null) return
       const vw = window.innerWidth
       const vh = window.innerHeight
-      const anchor = pos ?? { left: vw - 16 - FAB_SIZE, top: vh - 16 - FAB_SIZE }
-      const target = fitPanelToViewport(
-        anchor,
-        { width: card.offsetWidth, height: card.offsetHeight },
-        { width: vw, height: vh },
-      )
+      const size = { width: card.offsetWidth, height: card.offsetHeight }
+      const target = panelFit === null
+        ? fitPanelToViewport(
+          pos ?? { left: vw - 16 - FAB_SIZE, top: vh - 16 - FAB_SIZE },
+          size,
+          { width: vw, height: vh },
+        )
+        : clampPanelToViewport(panelFit, size, { width: vw, height: vh })
       setPanelFit(prev => (prev !== null && prev.left === target.left && prev.top === target.top ? prev : target))
     })
 
@@ -737,20 +785,27 @@ export function createCard(source: CardSource): () => ReactElement {
      * setPointerCapture——捕获会把 click 重定向到把手，里面的「—」收起钮
      * 点不中（122486e）；也不要越过阈值才捕获——快速甩动时指针在捕获前就
      * 离开把手，move 事件到不了把手，拖动直接丢失（"不跟手"）。window 监听
-     * 两个都不沾。
+     * 两个都不沾。另有第三个坑：松手发生在窗口外时 pointerup 丢失——手势会
+     * 卡死（面板追着悬停跑、下次点击落在「—」上就误收起）——用 window blur
+     * 与下一次 pointerdown 时的陈旧手势清理兜底。
      */
     const onHandlePointerDown = (event: React.PointerEvent<HTMLElement>): void => {
       if (event.pointerType === 'mouse' && event.button !== 0) return
       const el = cardRef.current ?? fabRef.current
       if (el === null) return
+      // 上一次手势若没正常收尾（松手在窗口外），先拆掉它的监听。
+      dragCleanupRef.current?.()
       const rect = el.getBoundingClientRect()
       const drag = {
         pointerId: event.pointerId,
+        form: el === cardRef.current ? 'card' as const : 'fab' as const,
         startX: event.clientX,
         startY: event.clientY,
         baseLeft: rect.left,
         baseTop: rect.top,
         moved: false,
+        lastLeft: rect.left,
+        lastTop: rect.top,
       }
       dragRef.current = drag
       const onMove = (e: PointerEvent): void => {
@@ -763,20 +818,23 @@ export function createCard(source: CardSource): () => ReactElement {
           drag.moved = true
           setDragging(true)
         }
-        setPos({ left: drag.baseLeft + dx, top: drag.baseTop + dy })
+        drag.lastLeft = drag.baseLeft + dx
+        drag.lastTop = drag.baseTop + dy
+        setPos({ left: drag.lastLeft, top: drag.lastTop })
       }
-      const onUp = (e: PointerEvent): void => {
-        if (e.pointerId !== drag.pointerId) return
+      const settle = (): void => {
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
         window.removeEventListener('pointercancel', onUp)
+        window.removeEventListener('blur', onBlur)
         dragCleanupRef.current = null
+        if (dragRef.current !== drag) return // 已被后续手势接管
         dragRef.current = null
         setDragging(false)
         if (!drag.moved) return
         // 真拖拽后紧跟的那次 click 一律吞掉：松手点可能落在把手的按钮上
         // （不该触发折叠/展开），也可能落在页面其它元素上（不该误点页面）。
-        // window 捕获阶段拦截，500ms 兜底自拆（pointercancel 无 click 的场景）。
+        // window 捕获阶段拦截，500ms 兜底自拆（pointercancel/blur 无 click 的场景）。
         const swallow = (clickEvent: Event): void => {
           clickEvent.stopPropagation()
           clickEvent.preventDefault()
@@ -784,31 +842,45 @@ export function createCard(source: CardSource): () => ReactElement {
         }
         window.addEventListener('click', swallow, true)
         setTimeout(() => { window.removeEventListener('click', swallow, true) }, 500)
-        setPos(prev => {
-          const clamped = clampAnchorToViewport(prev ?? { left: drag.baseLeft, top: drag.baseTop })
-          try {
-            localStorage.setItem(CARD_POS_KEY, JSON.stringify(clamped))
-          } catch {
-            // localStorage 不可用：位置只在本次页面存活。
-          }
-          return clamped
-        })
+        const rawPos = { left: drag.lastLeft, top: drag.lastTop }
+        // 球位锚点按球规则 clamp（整球留在视口内、贴边无隐性边距）。
+        const anchor = clampAnchorToViewport(rawPos)
+        setPos(anchor)
+        if (drag.form === 'card') {
+          // 卡片拖到哪就停在哪：面板只 clamp 不翻转，并记忆面板位（随 pos 落盘）。
+          const card = cardRef.current
+          const settledPanel = clampPanelToViewport(rawPos,
+            { width: card?.offsetWidth ?? 0, height: card?.offsetHeight ?? 0 },
+            { width: window.innerWidth, height: window.innerHeight })
+          setPanelFit(settledPanel)
+          writeStoredCardPos(anchor, settledPanel)
+        } else {
+          // 拖球只动锚点；面板记忆位保留。
+          writeStoredCardPos(anchor, undefined)
+        }
       }
+      const onUp = (e: PointerEvent): void => {
+        if (e.pointerId !== drag.pointerId) return
+        settle()
+      }
+      // 窗口失焦（含松手在窗口外）：按当前 lastLeft/lastTop 收尾，手势不卡死。
+      const onBlur = (): void => { settle() }
       window.addEventListener('pointermove', onMove)
       window.addEventListener('pointerup', onUp)
       window.addEventListener('pointercancel', onUp)
+      window.addEventListener('blur', onBlur)
       dragCleanupRef.current = () => {
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
         window.removeEventListener('pointercancel', onUp)
+        window.removeEventListener('blur', onBlur)
       }
     }
 
     if (state.collapsed) {
-      // 收起即丢弃展开钳位（render-phase 调整）：下次展开按当时球位/视口重算。
-      if (panelFit !== null) setPanelFit(null)
-      // 圆球与卡片共用 pos：卡片拖到哪儿，收起后球就在哪儿，展开也回原位。
-      // 球同样可拖（同一套阈值/捕获逻辑）；没移动过的松手才展开。
+      // 圆球与卡片共用 pos 锚点：卡片拖到哪儿，收起后球就在哪儿；展开后面板
+      // 回到 panelFit 记忆位（未拖过面板则以球位为锚推导，允许翻转）。
+      // 球同样可拖（同一套阈值/window 监听逻辑）；没移动过的松手才展开。
       const appliedFabStyle: CSSProperties = pos === null
         ? fabStyle
         : { ...fabStyle, right: 'auto', bottom: 'auto', left: `${String(pos.left)}px`, top: `${String(pos.top)}px` }

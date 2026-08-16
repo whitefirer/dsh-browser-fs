@@ -18,7 +18,7 @@
 import { DEFAULT_WS_PATH, parseHostFrame, type ResultFrame, type RosterExecutor } from '../wire.js'
 import { classifyCompatChange, resolveCompatInput, type CompatPickMode } from './compat-picker.js'
 import { deriveDeviceLabel } from './device.js'
-import { STRINGS, detectLang, subscribeLang } from './i18n.js'
+import { STRINGS, detectLang, langFromTag, subscribeLang } from './i18n.js'
 import { executeOp, handleBackend, type FsBackend } from './fs.js'
 import { createFilesBackend } from './files-backend.js'
 import { clearHandle, loadHandle, saveHandle } from './store.js'
@@ -30,10 +30,18 @@ export const inject = ['slots']
 /** apply 实际读到的 client ctx 面（cordis-client-runner 的 guard 代理兼容它）。 */
 interface ClientCtx {
   effect(fn: () => void | (() => void), label?: string): void
+  /** cordis 可选服务注入：服务在场时回调（本组合里 dsh-client-locale 提供 locale）。 */
+  inject(names: string[], fn: (ctx: unknown) => void): void
   slots: {
     inject(name: string, fn: () => unknown): unknown
     register(options: Record<string, unknown>, component: unknown): () => void
   }
+}
+
+/** dsh-client-locale 经 ctx.provide('locale') 暴露的语言服务面（只取用到的部分）。 */
+interface LocaleFace {
+  getSnapshot(): { active: string }
+  subscribe(fn: () => void): () => void
 }
 
 /**
@@ -420,10 +428,25 @@ export function apply(ctx: ClientCtx): void {
     }
   }, 'browser-fs: websocket lifecycle')
 
-  // 语言跟随：dsh 的 UI 语言体现在 <html lang>，MutationObserver 订阅其变化。
+  // 语言跟随：优先 dsh 的 locale 服务（dsh-client-locale 经 ctx.provide 提供，
+  // 是 Settings → General → Language 的真实载体）；缺席的组合退回
+  // <html lang>/navigator 并跟随 lang 属性变化（在场时 locale 服务是权威信号，
+  // html lang 兜底不抢）。
+  let localeDriven = false
+  ctx.inject(['locale'], (injected) => {
+    const face = (injected as { locale: LocaleFace }).locale
+    const adopt = (): void => {
+      localeDriven = true
+      setState({ lang: langFromTag(face.getSnapshot().active) })
+    }
+    adopt()
+    ctx.effect(() => face.subscribe(adopt), 'browser-fs: locale follow')
+  })
   ctx.effect(
-    () => subscribeLang(() => { setState({ lang: detectLang() }) }),
-    'browser-fs: lang follow',
+    () => subscribeLang(() => {
+      if (!localeDriven) setState({ lang: detectLang() })
+    }),
+    'browser-fs: lang fallback (html lang)',
   )
 
   ctx.effect(() => {

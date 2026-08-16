@@ -74,8 +74,9 @@ line mounts the host half; its config carries `wsPath` and `requestTimeoutMs`).
 The tool descriptions tell the model explicitly: these operate on the **browser machine's**
 local disk, not the host's filesystem.
 
-The card UI language follows the dsh page (reads `<html lang>` and reacts to changes live;
-Chinese/English switch automatically).
+The card UI language follows dsh's own Settings → General → Language switch (the plugin
+subscribes to the dsh client's `locale` service, live; compositions without that service
+fall back to `<html lang>`/browser language).
 
 ## Preview & refresh
 
@@ -104,19 +105,19 @@ language (plain text with a "语法着色加载中…" note while loading, silen
 text on failure).
 
 **The card is draggable**: the title row is the drag handle (mouse and touch; movement
-beyond 4px counts as a drag, so collapse/button clicks are never eaten); the position is
-remembered in localStorage (`dsh-browser-fs:card-pos`). While dragging, the panel/ball
-tracks the pointer directly (no clamping intervenes); clamping kicks in only on release
-and window resize: the ball always stays fully inside the viewport (flush to edges, no
-hidden margins), while the expanded panel prefers flipping its expansion direction
-(leftward/upward when the ball sits in the right/bottom half) and then clamps into a
-10px margin if flipping is not enough (width/height capped to the viewport); the clamp
-only affects the panel's display, not the ball's remembered position. The collapsed 📁
-ball shares the same position as the card (wherever the card was dragged, the ball
-appears there, and expanding restores the same spot); the ball is draggable too — a
-release without movement expands the card. Card, ball and preview window render at body
-level (z-100/200): above common overlays (e.g. sidebar-plugin panels) so clicks are never
-stolen by other plugins, yet still below dsh's own modals (z-1000+).
+beyond 4px counts as a drag, so collapse/button clicks are never eaten); while dragging,
+the panel/ball tracks the pointer directly, with clamping applied only on release and
+window resize. The ball always stays fully inside the viewport (flush to edges, no hidden
+margins). An expanded panel that has never been dragged derives its initial position from
+the ball (flipping leftward/upward when the ball sits in the right/bottom half, then
+clamping into a 10px margin with width/height capped to the viewport); once dragged it
+**stays where it was dropped** (viewport clamp only, never flipped), and the position is
+remembered across collapse/expand and page reloads (same localStorage key
+`dsh-browser-fs:card-pos` as the ball). The collapsed 📁 ball sits at the anchor (the
+card's top-left); it is draggable too — a release without movement expands the card.
+Card, ball and preview window render at body level (z-100/200): above common overlays
+(e.g. sidebar-plugin panels) so clicks are never stolen by other plugins, yet still below
+dsh's own modals (z-1000+).
 
 The "↻" at the end of the authorization button row refreshes the directory:
 

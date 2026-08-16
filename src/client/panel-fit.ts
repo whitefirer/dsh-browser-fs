@@ -28,6 +28,10 @@ export const PANEL_MARGIN = 10
  * 则面板右缘对齐球右缘（向左展开），球心在下半屏则面板底缘对齐球底缘
  * （向上展开）。翻转后仍出视口（含面板比视口还大的极端）时 clamp 进
  * 边距内，优先保住左上角。
+ *
+ * 仅用于「展开瞬间」的初始定位；面板一旦被用户拖动过或需要重钳位
+ * （resize 等），用 clampPanelToViewport——翻转只该发生在展开时，
+ * 否则松手/resize 会把用户摆好的面板拽走。
  * @param anchor - 悬浮球的 fixed 左上角。
  * @param panel - 展开面板当前实际尺寸。
  * @param viewport - 视口尺寸。
@@ -45,5 +49,19 @@ export function fitPanelToViewport(anchor: Point, panel: Size, viewport: Size): 
   return {
     left: Math.min(Math.max(left, PANEL_MARGIN), maxLeft),
     top: Math.min(Math.max(top, PANEL_MARGIN), maxTop),
+  }
+}
+
+/**
+ * 展开面板的纯钳位（不翻转）：把整个面板 clamp 进边距内（优先保住左上角）。
+ * 用于拖动松手/窗口 resize/内容撑高后的重钳位——尊重用户已摆好的位置。
+ * @param pos - 面板当前（或期望）左上角。
+ * @param panel - 面板当前实际尺寸。
+ * @param viewport - 视口尺寸。
+ */
+export function clampPanelToViewport(pos: Point, panel: Size, viewport: Size): Point {
+  return {
+    left: Math.min(Math.max(pos.left, PANEL_MARGIN), Math.max(PANEL_MARGIN, viewport.width - PANEL_MARGIN - panel.width)),
+    top: Math.min(Math.max(pos.top, PANEL_MARGIN), Math.max(PANEL_MARGIN, viewport.height - PANEL_MARGIN - panel.height)),
   }
 }
