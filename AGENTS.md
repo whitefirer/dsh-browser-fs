@@ -29,6 +29,13 @@ npm run smoke       # scripts/smoke.mjs
 **`lib/` 构建产物是入库的**（安装零脚本，`dsh plugin add github:...` 直接可用）——
 改完代码必须先 build 再提交，否则发出去的包是旧代码。
 
+## 发布
+
+推 `v*` tag 触发 GitHub Action 自动发 npm（`.github/workflows/publish.yml`，
+secret `NPM_TOKEN`）：先改 package.json 版本号并合入主干，再打同号 tag——
+workflow 会校验 tag 与版本号一致，不符直接失败。手动兜底：本机 `npm publish`
+（`publishConfig` 已钉官方源，provenance 只有 CI 路径有）。
+
 ## 目录地图（src/client/）
 
 | 文件 | 职责 |
