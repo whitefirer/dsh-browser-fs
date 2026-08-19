@@ -3,6 +3,8 @@
 [中文](README.md) | **English**
 
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#tools--capabilities)
+[![npm](https://img.shields.io/npm/v/dsh-browser-fs)](https://www.npmjs.com/package/dsh-browser-fs)
+[![license: MIT](https://img.shields.io/npm/l/dsh-browser-fs)](LICENSE)
 
 Lets dsh's agent read and write local files on **the machine where the browser runs**. dsh's
 built-in fs tools can only reach the host machine; when dsh is deployed remotely, the browser

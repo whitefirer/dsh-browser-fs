@@ -3,6 +3,8 @@
 **中文** | [English](README_EN.md)
 
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin#tools--capabilities)
+[![npm](https://img.shields.io/npm/v/dsh-browser-fs)](https://www.npmjs.com/package/dsh-browser-fs)
+[![license: MIT](https://img.shields.io/npm/l/dsh-browser-fs)](LICENSE)
 
 让 dsh 的 agent 读写**浏览器所在机器**的本地文件。dsh 自带的 fs 工具只能摸宿主机；
 远程部署时浏览器在别的机器上，agent 够不到你本地的文件。本插件补上这个缺口：
