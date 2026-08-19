@@ -33,7 +33,10 @@
 ## 安装
 
 ```sh
-# 直接从 GitHub 装（推荐；构建产物已入库，安装零脚本）
+# 从 npm 装（推荐，零脚本、无需构建授权）
+dsh plugin --profile web add dsh-browser-fs
+
+# 或直接从 GitHub 装（构建产物已入库，安装零脚本）
 dsh plugin --profile web add github:whitefirer/dsh-browser-fs
 
 # 本地开发：改代码后重装（改动需先 npm run build，产物 lib/ 已纳入版本库）

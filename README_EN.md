@@ -39,7 +39,10 @@ A two-sided plugin (cordis plugin system):
 ## Installation
 
 ```sh
-# Install from GitHub (recommended; build artifacts are committed, zero install scripts)
+# Install from npm (recommended; no install scripts, no build authorization needed)
+dsh plugin --profile web add dsh-browser-fs
+
+# Or install from GitHub (build artifacts are committed, zero install scripts)
 dsh plugin --profile web add github:whitefirer/dsh-browser-fs
 
 # Local development: reinstall after changes (run npm run build first; lib/ is committed)
