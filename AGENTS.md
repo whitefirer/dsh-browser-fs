@@ -1,6 +1,7 @@
 # AGENTS.md — dsh-browser-fs
 
 > 用户面文档看 README.md / README_EN.md；本文件写给改代码的人/agent。
+> 未来规划（图片 ImageBlock、设置卡片）见 `docs/roadmap.md`。
 
 ## 是什么
 
